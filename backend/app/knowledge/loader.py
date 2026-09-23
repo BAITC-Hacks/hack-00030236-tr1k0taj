@@ -14,6 +14,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.knowledge.expansions import load_expansions, payload_hash, variant_texts
 from app.knowledge.models import KitRecord
 
 # A KB node whose JSON is shorter than this becomes one searchable chunk; bigger nodes are split.
@@ -57,6 +58,39 @@ def _record(kind: str, key: str, payload: Any, *extra_text: str) -> dict:
         "search_text": search_text(payload, *extra_text),
         "origin": "kit",
     }
+
+
+def doc_text(kind: str, key: str, payload: Any) -> str:
+    """Original searchable text of a record (what build_records puts in search_text)."""
+    extra = [key.replace(".", " ").replace("_", " ")] if kind == "kb" else []
+    return search_text(payload, *extra)
+
+
+def fresh_expansion(kind: str, key: str, payload: Any, expansions: dict[str, dict]) -> dict | None:
+    """Expansion generated for exactly this payload; stale ones (record changed) are ignored."""
+    exp = expansions.get(f"{kind}/{key}")
+    return exp if exp and exp.get("hash") == payload_hash(payload) else None
+
+
+def document_variants(
+    kind: str, key: str, payload: Any, expansions: dict[str, dict]
+) -> list[tuple[str, str]]:
+    """(lang, text) that represent a record for semantic search: the original text first,
+    then ru/kk/mixed client questions and summaries from expansions.json (ADR 0010)."""
+    variants = [("doc", doc_text(kind, key, payload))]
+    if exp := fresh_expansion(kind, key, payload, expansions):
+        variants += variant_texts(exp)
+    return variants
+
+
+def apply_expansions(records: list[dict], expansions: dict[str, dict]) -> list[dict]:
+    """Append expansion texts to search_text: Kazakh/Russian words enter the lexical index, so
+    ru/kk questions find English KB entries even without an embedding key."""
+    for r in records:
+        variants = document_variants(r["kind"], r["key"], r["payload"], expansions)
+        if len(variants) > 1:
+            r["search_text"] = " ".join(text for _, text in variants)
+    return records
 
 
 def _unique_keys(items: list[dict], base) -> Iterator[tuple[str, dict]]:
@@ -114,9 +148,10 @@ def build_records(datasets_dir: Path) -> list[dict]:
 async def load_kit(session: AsyncSession, datasets_dir: Path, *, reset: bool = False) -> int:
     """Upsert kit rows. reset=True drops everything first (incl. CRUD edits) — clean kit state.
 
-    Without reset, rows edited through CRUD (origin=user) are kept.
+    Without reset, rows edited through CRUD (origin=user) are kept. search_text includes the
+    ru/kk expansions; a changed search_text invalidates the record's vectors (DB trigger).
     """
-    rows = build_records(datasets_dir)
+    rows = apply_expansions(build_records(datasets_dir), load_expansions())
     if reset:
         await session.execute(delete(KitRecord))
     stmt = insert(KitRecord).values(rows)
