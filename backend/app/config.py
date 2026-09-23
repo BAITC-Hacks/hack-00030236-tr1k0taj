@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     stt_provider: str = "mock"
     llm_provider: str = "mock"
     tts_provider: str = "mock"
+    stt_model: str = "gpt-4o-mini-transcribe"
+    tts_model: str = "gpt-4o-mini-tts"
+    tts_voice: str = "alloy"
 
 
 settings = Settings()

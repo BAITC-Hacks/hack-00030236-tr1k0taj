@@ -1,10 +1,11 @@
 """Выбор адаптеров речи через env (ADR 0008). Боевые адаптеры регистрируются здесь по имени."""
 
 from app.speech.mocks import MockSpeechToText, MockTextToSpeech
+from app.speech.openai_speech import OpenAISpeechToText, OpenAITextToSpeech
 from app.speech.ports import SpeechToText, TextToSpeech
 
-STT = {"mock": MockSpeechToText}
-TTS = {"mock": MockTextToSpeech}
+STT = {"mock": MockSpeechToText, "openai": OpenAISpeechToText}
+TTS = {"mock": MockTextToSpeech, "openai": OpenAITextToSpeech}
 
 
 def _pick(registry: dict, name: str, env: str):
