@@ -1,5 +1,6 @@
 """Порты речи. Боевые адаптеры STT/TTS реализуют их и регистрируются в app.speech.providers."""
 
+from collections.abc import AsyncIterator
 from typing import Literal, Protocol
 
 from pydantic import BaseModel
@@ -29,3 +30,7 @@ class TextToSpeech(Protocol):
     name: str
 
     async def synthesize(self, text: str, language: SpeechLanguage) -> AudioChunk | None: ...
+
+    def stream(self, text: str, language: SpeechLanguage) -> AsyncIterator[AudioChunk]:
+        """Потоковый синтез: чанки PCM по мере готовности. Пусто — нечего озвучивать."""
+        ...
