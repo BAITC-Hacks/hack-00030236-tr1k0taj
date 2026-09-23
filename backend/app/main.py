@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
@@ -29,12 +30,15 @@ async def lifespan(application: FastAPI):
                      repository=Repository(contexts=contexts))
     application.state.contexts = contexts
     application.state.kernel = kernel
-    application.state.calls = call.CallService(contexts, call.build_providers(settings), kernel=kernel)
+    providers = call.build_providers(settings)
+    application.state.calls = call.CallService(contexts, providers, kernel=kernel)
     await kernel.recover()
     schedule_reindex_knowledge()
+    warm_filler_task = asyncio.create_task(call.warm_tts_filler(providers.tts))
     try:
         yield
     finally:
+        warm_filler_task.cancel()
         await application.state.calls.shutdown()
         await kernel.shutdown()
         await stop_reindex_knowledge()

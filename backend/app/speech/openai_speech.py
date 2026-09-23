@@ -4,12 +4,15 @@
 """
 
 import re
+from collections.abc import AsyncIterator
 
 from opentelemetry import trace
 
 from app.config import settings
 from app.speech.errors import ProviderUnavailable
 from app.speech.ports import AudioChunk, SpeechLanguage, Transcript
+
+_PCM_MIME = "audio/pcm;rate=24000;channels=1"
 
 _KK = re.compile(r"[әғқңөұүһіӘҒҚҢӨҰҮҺІ]")
 _EXT = {"webm": "webm", "ogg": "ogg", "wav": "wav", "x-wav": "wav", "mpeg": "mp3", "mp4": "mp4"}
@@ -80,3 +83,30 @@ class OpenAITextToSpeech:
             {"gen_ai.provider.name": "openai", "gen_ai.request.model": settings.tts_model}
         )
         return AudioChunk(mime="audio/mpeg", data=res.content)
+
+    async def stream(self, text: str, language: SpeechLanguage) -> AsyncIterator[AudioChunk]:
+        """Потоковый PCM 24kHz/16-bit/mono: чанки по мере готовности (минимальная задержка)."""
+        client = self._c or _client("tts")
+        n_chunks, n_bytes, buf = 0, 0, b""
+        async with client.audio.speech.with_streaming_response.create(
+            model=settings.tts_model, voice=settings.tts_voice, input=text,
+            instructions=_INSTR.get(language, _INSTR["ru"]), response_format="pcm",
+        ) as response:
+            async for raw in response.iter_bytes(chunk_size=4800):  # ~100мс при 24kHz/16-bit
+                if not raw:
+                    continue
+                buf += raw
+                even = len(buf) - (len(buf) % 2)  # ровное число байт — целые 16-bit сэмплы
+                if even:
+                    n_chunks += 1
+                    n_bytes += even
+                    yield AudioChunk(mime=_PCM_MIME, data=buf[:even])
+                    buf = buf[even:]
+        if len(buf) >= 2:
+            n_chunks += 1
+            n_bytes += len(buf) - (len(buf) % 2)
+            yield AudioChunk(mime=_PCM_MIME, data=buf[: len(buf) - (len(buf) % 2)])
+        trace.get_current_span().set_attributes({
+            "gen_ai.provider.name": "openai", "gen_ai.request.model": settings.tts_model,
+            "tts.stream_chunks": n_chunks, "tts.stream_bytes": n_bytes,
+        })

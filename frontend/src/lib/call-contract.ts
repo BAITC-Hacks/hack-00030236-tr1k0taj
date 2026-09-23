@@ -26,7 +26,10 @@ export type RouterDebug = { turn_id: number | null; result: { output: unknown; m
 export type CallStarted = { session_id: string; created: boolean; context: SessionContext; capabilities: Capabilities };
 export type ActionEvent = { type: "action"; name: string; mode: "read" | "preview" | "execute" | "handoff" | "unsupported"; params: Record<string, unknown>; ok: boolean; result: unknown; error: Record<string, string> | null };
 export type CallError = { type: "error"; stage: string; code: string; message: string; fatal: boolean };
-export type AudioEvent = { type: "audio"; seq: number; mime: string; data: string; text: string };
+export type AudioEvent = {
+  type: "audio"; seq: number; mime: string; data: string; text: string;
+  chunk?: number; final?: boolean; filler?: boolean;
+};
 export type CallEvent = { turn_id: number } & (
   | { type: "transcript"; text: string; language: string | null; source: "stt" | "text" }
   | { type: "turn.started"; session_id: string; generation: number; context_version: number }

@@ -9,6 +9,7 @@ import base64
 import hashlib
 import itertools
 import json
+import re
 import time
 from collections import Counter, defaultdict
 from collections.abc import AsyncIterator, Iterator
@@ -37,13 +38,90 @@ from app.call.events import (
 )
 from app.call.journal import TERMINAL, CallJournal, fingerprint
 from app.call.ports import Providers
+from app.config import settings
 from app.context import Contexts, SessionContext, SessionNotFound, router_view
 from app.executor import Execution, ReplyBrief, TurnInput, reply_language
 from app.kernel import KernelError, RecordUpdate
 from app.knowledge import open_knowledge
 from app.router import Decision, RouterOutput, RouterResult, UnknownScenario, decide
-from app.speech import ProviderUnavailable, Transcript, split_sentences
+from app.speech import AudioChunk, ProviderUnavailable, Transcript, split_sentences
 from app.tracer import get_tracer, span
+
+_EARLY_BREAK = re.compile(r"[,.!?;:]")
+_FILLER_TEXT = {"ru": "Секунду, проверяю.", "kk": "Бір сәт, тексеріп жатырмын."}
+_filler_cache: dict[tuple[str, str], tuple[str, bytes] | None] = {}
+_filler_locks: defaultdict[tuple[str, str], asyncio.Lock] = defaultdict(asyncio.Lock)
+
+
+async def _tts_stream(tts: Any, text: str, language: str) -> AsyncIterator[AudioChunk]:
+    """Потоковые чанки TTS; провайдер без stream() (моки, тесты) — один чанк из synthesize()."""
+    streamer = getattr(tts, "stream", None)
+    if streamer is not None:
+        async for chunk in streamer(text, language):
+            yield chunk
+        return
+    chunk = await tts.synthesize(text, language)
+    if chunk is not None:
+        yield chunk
+
+
+def _early_cut(buf: str) -> tuple[str, str] | None:
+    """Первый кусок текста хода режем раньше конца предложения, чтобы TTS начал раньше."""
+    for m in _EARLY_BREAK.finditer(buf):
+        if m.end() >= 25:
+            return buf[: m.end()], buf[m.end():]
+    if len(buf) >= 40:
+        cut = buf.rfind(" ", 0, 40)
+        if cut <= 0:
+            cut = 40
+        return buf[:cut], buf[cut:]
+    return None
+
+
+def _split_with_early_cut(buf: str, first_state: dict) -> tuple[list[str], str]:
+    parts = split_sentences(buf)
+    done, rest = parts[:-1], parts[-1]
+    if done:
+        first_state["done"] = True
+        return done, rest
+    if not first_state["done"]:
+        cut = _early_cut(rest)
+        if cut is not None:
+            head, rest = cut
+            first_state["done"] = True
+            return [head], rest
+    return [], rest
+
+
+async def _filler_audio(tts: Any, language: str) -> tuple[str, bytes] | None:
+    """PCM короткой фразы-заглушки с кэшем в памяти процесса (озвучка не входит в ответ)."""
+    key = (tts.name, language)
+    if key in _filler_cache:
+        return _filler_cache[key]
+    async with _filler_locks[key]:
+        if key in _filler_cache:
+            return _filler_cache[key]
+        phrase = _FILLER_TEXT.get(language, _FILLER_TEXT["ru"])
+        mime, parts = None, []
+        try:
+            async for chunk in _tts_stream(tts, phrase, language):
+                mime = mime or chunk.mime
+                parts.append(chunk.data)
+        except Exception:  # noqa: BLE001 — заглушка необязательна, ход не должен падать
+            _filler_cache[key] = None
+            return None
+        result = (mime, b"".join(parts)) if mime and parts else None
+        _filler_cache[key] = result
+        return result
+
+
+async def warm_tts_filler(tts: Any) -> None:
+    """Прогрев кэша фразы-заглушки при старте приложения (ADR 0008: не блокирует запуск)."""
+    if not settings.tts_filler or tts.name == "mock":
+        return
+    for language in ("ru", "kk"):
+        with suppress(Exception):
+            await _filler_audio(tts, language)
 
 
 def _ms(start: float, end: float | None = None) -> int:
@@ -700,6 +778,29 @@ class _Turn:
             self.latency.response_first_token = _ms(t)
             resp.add_event("response_first_token", {"ms": self.latency.response_first_token})
 
+        send_filler = (
+            settings.tts_filler and hasattr(self.p.tts, "stream")
+            and self.decision is not None and self.decision.kind == "route"
+            and not (brief.scenario_id or "").startswith("SYS_")
+        )
+        first_state = {"done": False}
+
+        async def emit_filler() -> int:
+            """Заглушка сразу после route-решения, пока думает ответчик. seq 0; в ответ не входит."""
+            audio = await _filler_audio(self.p.tts, brief.language)
+            if audio is None:
+                return 0
+            mime, data = audio
+            if self.latency.tts_first_audio is None:
+                self.latency.tts_first_audio = self._stage("tts_first_audio", t)
+                self.latency.total = _ms(self.t0)
+            await out.put(AudioEvent(
+                turn_id=self.turn_id, seq=0, chunk=0, final=True, filler=True, mime=mime,
+                data=base64.b64encode(data).decode(),
+                text=_FILLER_TEXT.get(brief.language, _FILLER_TEXT["ru"]),
+            ))
+            return 1
+
         async def text_producer() -> None:
             if use_kernel:
                 await kernel_text_producer()
@@ -711,7 +812,7 @@ class _Turn:
                     first = False
                 full += delta
                 buf += delta
-                *done, buf = split_sentences(buf)
+                done, buf = _split_with_early_cut(buf, first_state)
                 for s in done:
                     await sentences.put((s, None, None))
                 await out.put(ReplyDeltaEvent(turn_id=self.turn_id, text=delta))
@@ -754,8 +855,8 @@ class _Turn:
                     full += delta
                     if segment_id:
                         # озвучиваем по предложениям, не дожидаясь конца сегмента ядра
-                        *done, segment_text[segment_id] = split_sentences(
-                            segment_text.get(segment_id, "") + delta
+                        done, segment_text[segment_id] = _split_with_early_cut(
+                            segment_text.get(segment_id, "") + delta, first_state
                         )
                         for sentence in done:
                             if sentence.strip():
@@ -790,51 +891,92 @@ class _Turn:
                 response_id=response_id,
             ))
 
-        async def audio_producer() -> None:
-            seq = 0  # номер отданного аудио; tts.seq — номер предложения, даже без аудио
-            for index in itertools.count():
-                if (job := await sentences.get()) is None:
-                    break
-                sentence, response_id, segment_id = job
-                with span("tts.sentence", {
-                    "session.id": self.sid, "turn.id": self.turn_id, "tts.seq": index,
-                    "tts.chars": len(sentence.strip()), "tts.provider": self.p.tts.name,
-                    "response.id": response_id, "segment.id": segment_id,
-                }) as ts:
-                    try:
-                        chunk = await self.p.tts.synthesize(sentence.strip(), brief.language)
-                    except Exception as e:  # noqa: BLE001
-                        _fail(ts, "tts", "tts_failed", str(e))
-                        chunk = e
-                    else:
-                        ts.set_attributes({"audio.mime": chunk.mime, "audio.bytes": len(chunk.data)}
-                                          if chunk is not None else {"tts.skipped": True})
-                if isinstance(chunk, Exception):
-                    await out.put(await self._error("tts", "tts_failed", "Не удалось озвучить часть ответа."))
-                    continue
-                if chunk is None:
-                    continue
-                if seq == 0:
-                    self.latency.tts_first_audio = self._stage("tts_first_audio", t)
-                    self.latency.total = _ms(self.t0)
-                await out.put(
-                    AudioEvent(
-                        turn_id=self.turn_id,
-                        seq=seq,
-                        mime=chunk.mime,
-                        data=base64.b64encode(chunk.data).decode(),
-                        text=sentence.strip(),
-                        response_id=response_id,
-                        segment_id=segment_id,
-                    )
-                )
-                seq += 1
+        async def audio_producer(seq: int) -> None:
+            """TTS по предложениям: до двух — параллельно (lookahead), отдаём строго по порядку."""
+            sem = asyncio.Semaphore(2)
+            order: asyncio.Queue = asyncio.Queue()
+            live: set[asyncio.Task] = set()
+
+            async def synth(index: int, sentence: str, response_id, segment_id, q: asyncio.Queue) -> None:
+                try:
+                    with span("tts.sentence", {
+                        "session.id": self.sid, "turn.id": self.turn_id, "tts.seq": index,
+                        "tts.chars": len(sentence.strip()), "tts.provider": self.p.tts.name,
+                        "response.id": response_id, "segment.id": segment_id,
+                    }) as ts:
+                        n = 0
+                        try:
+                            async for chunk in _tts_stream(self.p.tts, sentence.strip(), brief.language):
+                                n += 1
+                                await q.put(chunk)
+                        except Exception as e:  # noqa: BLE001
+                            _fail(ts, "tts", "tts_failed", str(e))
+                            await q.put(e)
+                        else:
+                            ts.set_attributes({"tts.chunks": n} if n else {"tts.skipped": True})
+                finally:
+                    await q.put(None)
+                    sem.release()
+
+            async def starter() -> None:
+                try:
+                    for index in itertools.count():
+                        job = await sentences.get()
+                        if job is None:
+                            break
+                        sentence, response_id, segment_id = job
+                        if not sentence.strip():
+                            continue
+                        q: asyncio.Queue = asyncio.Queue()
+                        await sem.acquire()
+                        await order.put((sentence, response_id, segment_id, q))
+                        task = asyncio.create_task(synth(index, sentence, response_id, segment_id, q))
+                        live.add(task)
+                        task.add_done_callback(live.discard)
+                finally:
+                    await order.put(None)
+
+            starter_task = asyncio.create_task(starter())
+            live.add(starter_task)
+            starter_task.add_done_callback(live.discard)
+            try:
+                while (item := await order.get()) is not None:
+                    sentence, response_id, segment_id, q = item
+                    chunk_idx = 0
+                    piece = await q.get()
+                    while piece is not None:
+                        if isinstance(piece, Exception):
+                            await out.put(await self._error(
+                                "tts", "tts_failed", "Не удалось озвучить часть ответа."
+                            ))
+                            piece = await q.get()
+                            continue
+                        nxt = await q.get()
+                        if self.latency.tts_first_audio is None:
+                            self.latency.tts_first_audio = self._stage("tts_first_audio", t)
+                            self.latency.total = _ms(self.t0)
+                        await out.put(AudioEvent(
+                            turn_id=self.turn_id, seq=seq, chunk=chunk_idx,
+                            final=not isinstance(nxt, AudioChunk),
+                            mime=piece.mime, data=base64.b64encode(piece.data).decode(),
+                            text=sentence.strip(), response_id=response_id, segment_id=segment_id,
+                        ))
+                        seq += 1
+                        chunk_idx += 1
+                        piece = nxt
+            finally:
+                for task in list(live):
+                    task.cancel()
+                for task in list(live):
+                    with suppress(asyncio.CancelledError):
+                        await task
 
         async def run_all() -> None:
             try:
+                seq0 = await emit_filler() if send_filler else 0
                 async with asyncio.TaskGroup() as tg:
                     tg.create_task(text_producer())
-                    tg.create_task(audio_producer())
+                    tg.create_task(audio_producer(seq0))
             except* _Cancelled:
                 resp.add_event("cancelled")
                 await out.put(TurnCancelledEvent(turn_id=self.turn_id))

@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     stt_model: str = "gpt-4o-mini-transcribe"
     tts_model: str = "gpt-4o-mini-tts"
     tts_voice: str = "alloy"
+    tts_filler: bool = True
 
 
 settings = Settings()

@@ -83,13 +83,20 @@ class ReplyDoneEvent(_Event):
 
 
 class AudioEvent(_Event):
-    """Озвученное предложение. Играйте по seq; первое может прийти раньше reply.done."""
+    """Кусок озвучки. Играйте по seq (сквозной на весь ход); первое может прийти раньше reply.done.
+
+    mime — либо `audio/mpeg` (целое предложение), либо `audio/pcm;rate=24000;channels=1`
+    (потоковый PCM 16-bit mono little-endian: чанки одного предложения склеиваются подряд).
+    """
 
     type: Literal["audio"] = "audio"
     seq: int
     mime: str
-    data: str = Field(description="Аудио предложения, base64")
-    text: str = Field(description="Озвученное предложение")
+    data: str = Field(description="Аудио-чанк, base64")
+    text: str = Field(description="Озвученный текст (предложение или чанк)")
+    chunk: int = Field(0, description="Номер чанка внутри text (0 — первый)")
+    final: bool = Field(True, description="Последний чанк для этого text")
+    filler: bool = Field(False, description="Короткая фраза-заглушка, не часть ответа")
     response_id: str | None = None
     segment_id: str | None = None
 

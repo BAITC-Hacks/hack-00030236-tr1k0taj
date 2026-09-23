@@ -23,7 +23,7 @@ from app.call.ports import (
     TurnInput,
 )
 from app.call.providers import build_providers
-from app.call.service import CallService
+from app.call.service import CallService, warm_tts_filler
 
 __all__ = [
     "ActionCall",
@@ -44,4 +44,5 @@ __all__ = [
     "TurnInput",
     "api_router",
     "build_providers",
+    "warm_tts_filler",
 ]
