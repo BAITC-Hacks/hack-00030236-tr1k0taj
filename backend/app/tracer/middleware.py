@@ -2,7 +2,11 @@
 
 Не BaseHTTPMiddleware — чтобы SSE шёл потоком. Span закрывается после последнего куска тела
 (`more_body=False`), при обрыве клиента или исключении, а не при возврате обработчика.
+Запросы к самой трассировке и health (`exclude_prefixes`) не трассируются: опрос панели не
+должен засорять историю. Параметр пути `session_id` пишется в `session.id` SERVER span'а.
 """
+
+from collections.abc import Sequence
 
 from opentelemetry import context as otel_context
 from opentelemetry import trace
@@ -20,11 +24,13 @@ def traceparent(ctx: trace.SpanContext) -> str:
 
 
 class TraceMiddleware:
-    def __init__(self, app: ASGIApp) -> None:
+    def __init__(self, app: ASGIApp,
+                 exclude_prefixes: Sequence[str] = ("/traces", "/health")) -> None:
         self.app = app
+        self.exclude_prefixes = tuple(exclude_prefixes)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http":
+        if scope["type"] != "http" or scope["path"].startswith(self.exclude_prefixes):
             await self.app(scope, receive, send)
             return
         carrier = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
@@ -45,6 +51,9 @@ class TraceMiddleware:
                 if template:
                     span.set_attribute("http.route", template)
                     span.update_name(f"{method} {template}")
+                session_id = (scope.get("path_params") or {}).get("session_id")
+                if session_id:
+                    span.set_attribute("session.id", str(session_id))
                 span.end()
 
         async def traced_send(message: Message) -> None:
