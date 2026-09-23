@@ -11,7 +11,9 @@
 текст ответа по кускам, аудио по предложениям и итоговую трассировку с таймингами.
 
 ## Сценарий
-1. Фронт вызывает `POST /calls` и получает `session_id` и capabilities (какие провайдеры живые, а какие моки).
+1. Фронт генерирует UUID сессии (`crypto.randomUUID()`) и хранит его, пока идёт разговор. Этот UUID —
+   ключ потока общения во всех вызовах. `POST /calls {"session_id": "<uuid>"}` открывает звонок и отдаёт
+   capabilities; вызов необязателен — первый ход по новому UUID открывает звонок сам.
 2. Клиент жмёт push-to-talk. Фронт отправляет запись в `POST /calls/{id}/turns/audio` (или текст в `/turns/text`).
 3. Ответ — `text/event-stream`. Сервер по очереди выполняет STT → роутер → валидацию и политику → исполнитель
    (чтения) → генерацию ответа → TTS и отдаёт событие после каждого этапа.
@@ -30,7 +32,7 @@ Streaming здесь означает поток **событий ответа**
 | Метод | Путь | Что |
 |---|---|---|
 | GET | `/capabilities` | провайдеры, режим моков, поддержанные действия |
-| POST | `/calls` | новый звонок → `CallStarted` |
+| POST | `/calls` | `{"session_id": "<uuid>"?}` → `CallStarted`; 201 — новая, 200 — уже была (не сбрасывается) |
 | POST | `/calls/{id}/reset` | новый звонок в той же сессии (`generation + 1`) |
 | POST | `/calls/{id}/turns/text` | `{"text": "...", "language_hint": "ru"}` → SSE |
 | POST | `/calls/{id}/turns/audio` | multipart: `audio` (webm/ogg/wav), `language_hint?` → SSE |
@@ -38,6 +40,10 @@ Streaming здесь означает поток **событий ответа**
 | POST | `/calls/{id}/turns/{turn_id}/playback` | `{"eos_to_playback_ms": 1234}` → запись timing на доску, 204 |
 | GET | `/calls/{id}/router/last` | реальный промпт и сырой ответ роутера за последний ход (спека 5.4) |
 | GET | `/sessions/{id}/context`, `/sessions/{id}/board` | модуль `context`: снимок и доска для панели |
+
+`session_id` — UUID (иначе 422). Ходы по незнакомому UUID открывают звонок сами (первый ход, рестарт
+backend). `cancel`, `playback`, `router/last` по незнакомому UUID → 404. Если UUID не передан в `POST /calls`,
+его генерирует сервер.
 
 Ошибки: 404 — сессии нет; 409 `turn_in_progress` — предыдущий ход ещё идёт (один foreground на сессию);
 422 — пустой текст или аудио.

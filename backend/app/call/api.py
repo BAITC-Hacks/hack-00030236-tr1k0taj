@@ -5,8 +5,9 @@
 
 from collections.abc import AsyncIterable
 from typing import Annotated, Literal
+from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Path, Request, UploadFile
+from fastapi import APIRouter, Depends, Form, HTTPException, Path, Request, Response, UploadFile
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 from pydantic import BaseModel, Field
 
@@ -28,38 +29,52 @@ def get_calls(request: Request) -> CallService:
 
 
 Calls = Annotated[CallService, Depends(get_calls)]
-SessionId = Annotated[str, Path(description="ID сессии из POST /calls")]
+SessionId = Annotated[
+    UUID,
+    Path(
+        description="UUID сессии — ключ потока общения. Генерирует фронт (`crypto.randomUUID()`), "
+        "его же возвращает POST /calls, если UUID не передан."
+    ),
+]
 TurnId = Annotated[int, Path(description="turn_id из события turn.started")]
 
 
 async def existing_session(session_id: SessionId, calls: Calls) -> str:
+    sid = str(session_id)
     try:
-        await calls.contexts.snapshot(session_id)
+        await calls.contexts.snapshot(sid)
     except SessionNotFound:
         raise HTTPException(404, "session not found") from None
-    return session_id
+    return sid
 
 
 Session = Annotated[str, Depends(existing_session)]
 
 
-async def free_session(session_id: Session, calls: Calls) -> str:
+def _not_busy(sid: str, calls: CallService) -> str:
     """Один foreground-ход на сессию (спека 7.5): пока идёт ход, новый ввод — 409."""
-    if calls.busy(session_id):
+    if calls.busy(sid):
         raise HTTPException(409, "turn_in_progress")
-    return session_id
+    return sid
 
 
-FreeSession = Annotated[str, Depends(free_session)]
+async def turn_session(session_id: SessionId, calls: Calls) -> str:
+    """Ход по UUID с фронта: незнакомая сессия открывается сама (первый ход или рестарт backend)."""
+    sid = _not_busy(str(session_id), calls)
+    await calls.ensure_call(sid)
+    return sid
+
+
+TurnSession = Annotated[str, Depends(turn_session)]
 
 NOT_FOUND = {404: {"description": "Сессии нет (или backend перезапускался)"}}
-TURN_ERRORS = NOT_FOUND | {
+TURN_ERRORS = {
     200: {
         "description": "Поток событий хода. Пример ниже показывает форму, числа в нём условные.",
         "content": {"text/event-stream": {"example": SSE_EXAMPLE}},
     },
     409: {"description": "`turn_in_progress`: предыдущий ход ещё идёт"},
-    422: {"description": "Пустая реплика или аудио"},
+    422: {"description": "Пустая реплика или аудио, `session_id` не UUID"},
 }
 SSE_DOC = """Ответ — поток `text/event-stream`. Каждое событие: `event: <type>` и `data: <JSON>`,
 в JSON есть `type` и `turn_id`. Типичный порядок:
@@ -86,8 +101,17 @@ class Capabilities(BaseModel):
     dataset_today: str
 
 
+class StartCall(BaseModel):
+    session_id: UUID | None = Field(
+        None,
+        description="UUID сессии с фронта. Не передан — сервер сгенерирует свой.",
+        examples=["3f1c2a9e-8b7d-4c61-9f0e-2d5a7b6c4e10"],
+    )
+
+
 class CallStarted(BaseModel):
-    session_id: str
+    session_id: str = Field(description="UUID сессии, по нему идут все остальные вызовы")
+    created: bool = Field(description="false — сессия с этим UUID уже была, вернули её состояние")
     context: SessionContext
     capabilities: Capabilities
 
@@ -148,11 +172,24 @@ async def get_capabilities(calls: Calls) -> Capabilities:
     return capabilities(calls.providers)
 
 
-@router.post("/calls", status_code=201, summary="Начать звонок")
-async def start_call(calls: Calls) -> CallStarted:
-    ctx = await calls.contexts.start_call()
+@router.post(
+    "/calls",
+    status_code=201,
+    summary="Начать звонок",
+    description="Идемпотентно по `session_id`: 201 — новая сессия, 200 — сессия уже была "
+    "(состояние не сбрасывается; для нового звонка есть /reset). Вызов необязателен: "
+    "первый ход по новому UUID открывает звонок сам.",
+    responses={200: {"description": "Сессия с этим UUID уже существует", "model": CallStarted}},
+)
+async def start_call(
+    calls: Calls, response: Response, body: StartCall | None = None
+) -> CallStarted:
+    sid = str(body.session_id) if body and body.session_id else str(uuid4())
+    ctx, created = await calls.ensure_call(sid)
+    if not created:
+        response.status_code = 200
     return CallStarted(
-        session_id=ctx.session_id, context=ctx, capabilities=capabilities(calls.providers)
+        session_id=sid, created=created, context=ctx, capabilities=capabilities(calls.providers)
     )
 
 
@@ -160,10 +197,10 @@ async def start_call(calls: Calls) -> CallStarted:
     "/calls/{session_id}/reset",
     summary="Новый звонок в той же сессии",
     description="`generation + 1`, контекст и темы очищаются, история прошлого звонка не протекает.",
-    responses=NOT_FOUND,
+    responses={409: TURN_ERRORS[409]},
 )
-async def reset_call(session_id: FreeSession, calls: Calls) -> SessionContext:
-    return await calls.contexts.start_call(session_id)
+async def reset_call(session_id: SessionId, calls: Calls) -> SessionContext:
+    return await calls.contexts.start_call(_not_busy(str(session_id), calls))
 
 
 @router.post(
@@ -174,7 +211,7 @@ async def reset_call(session_id: FreeSession, calls: Calls) -> SessionContext:
     responses=TURN_ERRORS,
 )
 async def text_turn(
-    session_id: FreeSession, body: TextTurn, calls: Calls
+    session_id: TurnSession, body: TextTurn, calls: Calls
 ) -> AsyncIterable[TurnEvent]:
     async for e in calls.run_turn(
         session_id, text=body.text.strip(), language_hint=body.language_hint
@@ -191,7 +228,7 @@ async def text_turn(
     responses=TURN_ERRORS | {413: {"description": "Аудио больше 10 МБ"}},
 )
 async def audio_turn(
-    session_id: FreeSession,
+    session_id: TurnSession,
     calls: Calls,
     form: Annotated[AudioTurn, Form(media_type="multipart/form-data")],
 ) -> AsyncIterable[TurnEvent]:
