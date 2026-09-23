@@ -155,8 +155,8 @@ def output_schema(ids: list[str]) -> dict[str, Any]:
     return obj({
         "scenarios": {"type": "array",
                       "items": obj({"scenario_id": sid, "confidence": conf,
-                                    "reason": {"type": "string"}})},
-        "alternatives": {"type": "array",
+                                    "reason": {"type": "string", "maxLength": 200}})},
+        "alternatives": {"type": "array", "maxItems": 3,
                          "items": obj({"scenario_id": sid, "confidence": conf})},
         "language": {"type": "string", "enum": ["ru", "kk", "mixed"]},
         "slots": {"type": "array",

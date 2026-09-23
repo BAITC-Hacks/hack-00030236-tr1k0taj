@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     embedding_model: str = "text-embedding-3-large"
     embedding_dimensions: int = Field(default=3072, ge=1, le=3072)
     embeddings_enabled: bool = True
+    # TTL for the process-local rag_query result cache (0 disables caching).
+    knowledge_cache_ttl: float = Field(default=300, ge=0, le=3600)
     # Offline only: generates ru/kk search expansions (`just expand-kb`), not used at runtime.
     expansion_model: str = "gpt-5.5"
     kernel_max_segments: int = Field(default=4, ge=1, le=16)
