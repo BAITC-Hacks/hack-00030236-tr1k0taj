@@ -134,6 +134,10 @@ class TurnDoneEvent(_Event):
     reply: str
     latency_ms: Latency
     context_version: int
+    trace_id: str | None = Field(
+        None, description="W3C trace-id хода (как `x-trace-id`): панель открывает "
+        "`GET /traces/{trace_id}`. null — трассировка выключена"
+    )
 
 
 TurnEvent = Annotated[

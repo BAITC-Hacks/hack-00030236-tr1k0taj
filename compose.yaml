@@ -30,6 +30,10 @@ services:
       STT_PROVIDER: ${STT_PROVIDER:-mock}
       LLM_PROVIDER: ${LLM_PROVIDER:-mock}
       TTS_PROVIDER: ${TTS_PROVIDER:-mock}
+      # трассировка (ADR 0013): пусто — span'ы только в памяти процесса для GET /traces
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-voice-router-backend}
+      TRACE_EXPORT_CONTENT: ${TRACE_EXPORT_CONTENT:-false}
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     volumes:

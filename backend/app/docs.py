@@ -47,6 +47,14 @@ for (;;) {
 Строки `: ping` — keepalive, их пропускаем. Схемы всех событий смотрите в разделе **Schemas**
 (`TranscriptEvent`, `RoutingEvent`, …, `TurnDoneEvent`).
 
+### Трассировка (OpenTelemetry)
+
+Фронт может прислать W3C-заголовок `traceparent` — сервер продолжит его трассу. Каждый ответ
+возвращает `traceparent` и `x-trace-id`; `turn.done` несёт тот же `trace_id`. Дерево хода
+(сервер → `turn` → `stt` → `router` → `executor` → `responder` → `segment` → `tts.sentence`) —
+`GET /traces/{trace_id}`, трассы звонка — `GET /traces?session_id=<uuid>`. Замеры `playback`
+и `cancel` фронт шлёт с `traceparent` хода, чтобы они легли в ту же трассу.
+
 ### Режим без ключей
 
 По умолчанию `STT_PROVIDER`, `LLM_PROVIDER` и `TTS_PROVIDER` равны `mock`. Звонок не падает:
@@ -77,6 +85,13 @@ TAGS = [
         "`kind`: `scenario`, `system_intent`, `action`, `slot`, `client`, `policy`, `claim`, "
         "`payment`, `kb`, `office`, `clinic`, `inspection_point`, `queue`. "
         "Спека: `docs/specs/knowledge-module.md`.",
+    },
+    {
+        "name": "trace",
+        "description": "Трассы хода в формате OpenTelemetry для панели: дерево span'ов с "
+        "таймингами, решением роутера, чтениями и ошибками. Хранятся в памяти процесса "
+        "(после рестарта пусто), при `OTEL_EXPORTER_OTLP_ENDPOINT` уходят и по OTLP. "
+        "Спека: `docs/specs/tracer-module.md`.",
     },
     {"name": "health", "description": "Проверка, что backend и БД живы."},
 ]

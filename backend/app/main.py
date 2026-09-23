@@ -8,12 +8,15 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import call, context, kernel, knowledge
+from app import call, context, kernel, knowledge, tracer
 from app.config import settings
 from app.db import SessionLocal, engine, get_session
 from app.docs import DESCRIPTION, TAGS
 from app.kernel import KernelError, ModelDriver, Repository, Runtime
 from app.knowledge import ensure_loaded, schedule_reindex_knowledge, stop_reindex_knowledge
+
+# до создания app: span'ы middleware и lifespan пишутся в настроенный провайдер (ADR 0013)
+tracer.setup_tracing()
 
 
 @asynccontextmanager
@@ -49,6 +52,9 @@ app.include_router(call.api_router)
 app.include_router(context.api_router)
 app.include_router(knowledge.api_router)
 app.include_router(kernel.api_router)
+app.include_router(tracer.api_router)
+# последним add_middleware → самый внешний: SERVER span покрывает весь запрос и SSE-тело
+app.add_middleware(tracer.TraceMiddleware)
 
 
 @app.exception_handler(KernelError)
