@@ -17,6 +17,7 @@ from app.kernel.types import (
     PlaybackRequest,
     RecordRequest,
     SessionSnapshot,
+    TaskId,
     TaskRequest,
     TurnAccepted,
     TurnRequest,
@@ -77,7 +78,7 @@ async def update_record(session_id: UUID, request: RecordRequest, kernel: Kernel
 
 
 @router.get("/sessions/{session_id}/records")
-async def list_records(session_id: UUID, kernel: Kernel, task_id: str | None = None):
+async def list_records(session_id: UUID, kernel: Kernel, task_id: TaskId | None = None):
     return await kernel.list_records(str(session_id), task_id)
 
 

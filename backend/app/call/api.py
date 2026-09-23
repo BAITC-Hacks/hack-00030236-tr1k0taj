@@ -21,6 +21,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import StreamingResponse
+from opentelemetry import trace
 from pydantic import BaseModel, Field, model_validator
 
 from app.call.ports import Providers
@@ -40,6 +41,21 @@ def get_calls(request: Request) -> CallService:
     return request.app.state.calls
 
 
+def trace_request(request: Request, session_id: str | None = None, **attrs) -> trace.Span:
+    """Атрибуты входящего запроса на SERVER span из TraceMiddleware (docs/specs/tracer-module.md)."""
+    h = request.headers
+    size = h.get("content-length")
+    current = trace.get_current_span()
+    current.set_attributes({k: v for k, v in {
+        "session.id": session_id,
+        "http.request.body.size": int(size) if size and size.isdigit() else None,
+        "http.request.header.content_type": h.get("content-type"),
+        "user_agent.original": h.get("user-agent"),
+        **attrs,
+    }.items() if v is not None})
+    return current
+
+
 Calls = Annotated[CallService, Depends(get_calls)]
 SessionId = Annotated[
     UUID,
@@ -51,8 +67,9 @@ SessionId = Annotated[
 TurnId = Annotated[int, Path(description="turn_id из события turn.started")]
 
 
-async def existing_session(session_id: SessionId, calls: Calls) -> str:
+async def existing_session(session_id: SessionId, calls: Calls, request: Request) -> str:
     sid = str(session_id)
+    trace_request(request, sid)
     try:
         await calls.contexts.snapshot(sid)
     except SessionNotFound:
@@ -70,8 +87,9 @@ def _not_busy(sid: str, calls: CallService) -> str:
     return sid
 
 
-async def turn_session(session_id: SessionId, calls: Calls) -> str:
+async def turn_session(session_id: SessionId, calls: Calls, request: Request) -> str:
     """Ход по UUID с фронта: незнакомая сессия открывается сама (первый ход или рестарт backend)."""
+    trace_request(request, str(session_id))
     sid = str(session_id)
     await calls.ensure_call(sid)
     return sid
@@ -234,9 +252,10 @@ async def get_capabilities(calls: Calls) -> Capabilities:
     responses={200: {"description": "Сессия с этим UUID уже существует", "model": CallStarted}},
 )
 async def start_call(
-    calls: Calls, response: Response, body: StartCall | None = None
+    calls: Calls, request: Request, response: Response, body: StartCall | None = None
 ) -> CallStarted:
     sid = str(body.session_id) if body and body.session_id else str(uuid4())
+    trace_request(request, sid)
     ctx, created = await calls.ensure_call(sid)
     if not created:
         response.status_code = 200
@@ -252,7 +271,8 @@ async def start_call(
     description="`generation + 1`, контекст и темы очищаются, история прошлого звонка не протекает.",
     responses={409: TURN_ERRORS[409]},
 )
-async def reset_call(session_id: SessionId, calls: Calls) -> SessionContext:
+async def reset_call(session_id: SessionId, calls: Calls, request: Request) -> SessionContext:
+    trace_request(request, str(session_id))
     return await calls.contexts.start_call(_not_busy(str(session_id), calls))
 
 
@@ -264,14 +284,17 @@ async def reset_call(session_id: SessionId, calls: Calls) -> SessionContext:
     responses=TURN_ERRORS,
 )
 async def text_turn(
-    session_id: TurnSession, body: TextTurn, calls: Calls
+    session_id: TurnSession, body: TextTurn, calls: Calls, request: Request
 ) -> StreamingResponse:
+    trace_request(request, session_id, **{"input.source": "text",
+                                          "language_hint": body.language_hint})
     request_id, is_new = await calls.ingress(
         session_id, text=body.text, language_hint=body.language_hint,
         request_id=body.request_id, task_id=body.task_id, updates=body.updates,
         interrupt_previous=body.interrupt_previous,
     )
     return _stream_response(calls, session_id, request_id, cancel_on_disconnect=is_new)
+
 
 
 @router.post(
@@ -285,12 +308,17 @@ async def text_turn(
 async def audio_turn(
     session_id: TurnSession,
     calls: Calls,
+    request: Request,
     form: Annotated[AudioTurn, Form(media_type="multipart/form-data")],
 ) -> StreamingResponse:
     audio = form.audio
     data = await audio.read()
     if not data:
         raise HTTPException(422, "empty audio")
+    trace_request(request, session_id, **{
+        "input.source": "audio", "language_hint": form.language_hint,
+        "audio.mime": audio.content_type, "audio.bytes": len(data), "audio.filename": audio.filename,
+    })
     if len(data) > MAX_AUDIO_BYTES:
         raise HTTPException(413, "audio too large")
     request_id, is_new = await calls.ingress(
@@ -352,6 +380,10 @@ async def replay_events(
 async def cancel_turn(
     session_id: Session, turn_id: TurnId, calls: Calls, body: CancelTurn | None = None
 ) -> None:
+    # фронт шлёт traceparent хода: событие попадает в его трассу (tracer-module.md, playback)
+    trace.get_current_span().set_attribute("turn.id", turn_id)
+    trace.get_current_span().add_event("cancel", {k: v for k, v in {
+        "turn.id": turn_id, "played_ms": body.played_ms if body else None}.items() if v is not None})
     await calls.cancel_turn(session_id, turn_id, body.played_ms if body else None)
 
 
@@ -366,6 +398,12 @@ async def cancel_turn(
 async def report_playback(
     session_id: Session, turn_id: TurnId, body: Playback, calls: Calls
 ) -> None:
+    trace.get_current_span().set_attribute("turn.id", turn_id)
+    trace.get_current_span().add_event("playback", {k: v for k, v in {
+        "turn.id": turn_id, "eos_to_playback_ms": body.eos_to_playback_ms,
+        "eos_to_reply_text_ms": body.eos_to_reply_text_ms, "played_ms": body.played_ms,
+        "response.id": str(body.response_id) if body.response_id else None,
+    }.items() if v is not None})
     if body.played_ms is not None:
         if calls.kernel is None:
             raise HTTPException(409, "kernel_playback_unavailable")

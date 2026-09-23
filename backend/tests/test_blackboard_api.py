@@ -29,6 +29,7 @@ def test_task_controls_record_conflicts_and_private_projection():
             assert (await client.post(base + "/records", json=stale)).status_code == 409
             records = await client.get(base + "/records?task_id=claim:1")
             assert records.status_code == 200 and "PRIVATE_" not in records.text
+            assert (await client.get(base + "/records", params={"task_id": "bad scope"})).status_code == 422
             assert sum(record["active"] for record in records.json()["records"]) == 1
             paused = {"request_id": str(uuid4()), "task_id": "claim:1", "status": "paused"}
             assert (await client.post(base + "/tasks", json=paused)).status_code == 200

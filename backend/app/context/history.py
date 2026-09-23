@@ -69,7 +69,7 @@ def conversation_history(context: SessionContext) -> list[dict]:
         role = "user" if turn.role == "client" else "assistant"
         item = {
             "role": role, "turn_id": turn.turn_id, "text": turn.text,
-            "language": turn.language, "task_id": turn_tasks.get(str(turn.turn_id)),
+            "language": turn.language, "task_id": turn_tasks.get(str(turn.turn_id), turn.task_id),
         }
         if role == "assistant":
             item.update({

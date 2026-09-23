@@ -8,20 +8,27 @@ from app.context.history import conversation_history
 from app.context.types import SessionContext
 
 
-def router_view(snap: SessionContext, last_turns: int = 4) -> dict[str, Any]:
+def router_view(snap: SessionContext, last_turns: int = 4, task_id: str | None = None) -> dict[str, Any]:
     """Переменная часть промпта роутера: проверенный контекст и последние ходы (спека 5.1)."""
-    topics = [t for t in [snap.active_scenario, *reversed(snap.pending_topics)] if t]
-    pc = snap.pending_confirmation
+    scope = task_id or snap.domain_task_id
+    if task_id is None and not snap.history and snap.kernel:
+        scope = ensure_blackboard(deepcopy(snap.kernel))["active_task_id"]
+    domain = snap if scope == snap.domain_task_id else SessionContext(
+        session_id=snap.session_id, **snap.task_states.get(scope, {})
+    )
+    topics = [t for t in [domain.active_scenario, *reversed(domain.pending_topics)] if t]
+    pc = domain.pending_confirmation
     return {
         "client_identified": snap.client_id is not None,
-        "active_scenario": snap.active_scenario,
-        "pending_topics": list(snap.pending_topics),
-        "known_slots": {t: snap.slots_by_topic[t] for t in topics if snap.slots_by_topic.get(t)},
+        "active_scenario": domain.active_scenario,
+        "pending_topics": list(domain.pending_topics),
+        "known_slots": {t: domain.slots_by_topic[t] for t in topics if domain.slots_by_topic.get(t)},
         "pending_confirmation": {"action": pc.action, "params": pc.params} if pc else None,
         "facts": [{"key": f.key, "value": f.value, "source": f.source,
-                   "source_id": f.source_id} for f in snap.facts],
-        "recent_turns": conversation_history(snap)[-last_turns:],
-        "active_task_id": ensure_blackboard(deepcopy(snap.kernel))["active_task_id"],
+                   "source_id": f.source_id} for f in domain.facts],
+        "recent_turns": [item for item in conversation_history(snap)
+                         if (item.get("task_id") or "default") == scope][-last_turns:],
+        "active_task_id": scope,
     }
 
 

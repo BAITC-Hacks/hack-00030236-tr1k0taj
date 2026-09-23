@@ -7,14 +7,18 @@
 import asyncio
 import base64
 import hashlib
+import itertools
+import json
 import time
-from collections import defaultdict
-from collections.abc import AsyncIterator
-from contextlib import aclosing, suppress
+from collections import Counter, defaultdict
+from collections.abc import AsyncIterator, Iterator
+from contextlib import aclosing, contextmanager, suppress
 from typing import Any
 from uuid import uuid4
 
 import anyio
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
 from pydantic import BaseModel
 
 from app.call.events import (
@@ -39,6 +43,7 @@ from app.kernel import KernelError, RecordUpdate
 from app.knowledge import open_knowledge
 from app.router import Decision, RouterOutput, RouterResult, UnknownScenario, decide
 from app.speech import ProviderUnavailable, Transcript, split_sentences
+from app.tracer import get_tracer, span
 
 
 def _ms(start: float, end: float | None = None) -> int:
@@ -51,6 +56,16 @@ def _epoch_ms() -> int:
 
 class _Cancelled(Exception):
     pass
+
+
+def _fail(s: trace.Span, stage: str, code: str, message: str = "") -> None:
+    """Ошибка этапа в трассе: статус ERROR и стабильный код (docs/specs/tracer-module.md)."""
+    s.set_attributes({"error.code": code, "error.stage": stage})
+    s.set_status(Status(StatusCode.ERROR, f"{code}: {message}"[:500]))
+
+
+def _json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, default=str)
 
 
 class CallService:
@@ -223,6 +238,14 @@ class CallService:
                            and (request_id is None or request_id == rid)]
                 if (all(record["status"] in TERMINAL for record in records)
                         and all(cursor >= record["last_seq"] for record in records)):
+                    # Finish stage timing/spans before closing the HTTP span. Cancelled providers
+                    # may resist cancellation; their terminal replay must remain finite.
+                    cleanup = [task for (session, rid), task in self._producers.items()
+                               if session == sid and not task.done()
+                               and (request_id is None or request_id == rid)
+                               and journal["requests"][rid]["status"] in {"completed", "failed"}]
+                    if cleanup:
+                        await asyncio.wait(cleanup, timeout=1)
                     finished = True
                     return
                 try:
@@ -261,23 +284,30 @@ class CallService:
             )
             return
         async with lock:
-            turn = _Turn(self, session_id, request_id=request_id, task_id=task_id,
-                         updates=updates, interrupt_previous=interrupt_previous)
+            turn = _Turn(self, session_id, audio is not None, language_hint,
+                         request_id=request_id, task_id=task_id, updates=updates,
+                         interrupt_previous=interrupt_previous)
             try:
                 async for event in turn.run(text, audio, mime, language_hint):
+                    turn.observe(event)
                     yield event
             finally:
-                if not turn.finished and turn.turn_id:
-                    # клиент оборвал поток: ход неактуален, поздние события не нужны
-                    with anyio.CancelScope(shield=True):
-                        await self.cancel_turn(session_id, turn.turn_id)
+                try:
+                    if not turn.finished and turn.turn_id:
+                        # клиент оборвал поток: ход неактуален, поздние события не нужны
+                        with anyio.CancelScope(shield=True):
+                            await self.cancel_turn(session_id, turn.turn_id)
+                finally:
+                    turn.close()
 
 
 class _Turn:
     """Состояние одного хода: тайминги и то, что пойдёт в trace."""
 
-    def __init__(self, svc: CallService, session_id: str, *, request_id=None,
-                 task_id="default", updates=None, interrupt_previous=False) -> None:
+    def __init__(
+        self, svc: CallService, session_id: str, is_audio: bool = False, hint: str | None = None,
+        *, request_id=None, task_id="default", updates=None, interrupt_previous=False,
+    ) -> None:
         self.svc = svc
         self.p = svc.providers
         self.ctx = svc.contexts
@@ -288,12 +318,51 @@ class _Turn:
         self.latency = Latency()
         self.stages: list[tuple[str, int, int]] = []  # (stage, start_epoch_ms, end_epoch_ms)
         self.router_out: RouterOutput | None = None
+        self.router_rr: RouterResult | None = None
         self.decision: Decision | None = None
         self.actions: list[str] = []
         self.request_id = request_id
         self.task_id = task_id
         self.updates = list(updates or [])
         self.interrupt_previous = interrupt_previous
+        # Span хода открыт явно (не current): генератор отдаёт события через yield, и контекст
+        # OTel не должен «висеть» между кусками SSE. Этапы делают его текущим только внутри
+        # блоков без yield (_child), задачи ответа получают его копией контекста при создании.
+        self.span = get_tracer().start_span("turn", attributes={
+            "session.id": session_id, "input.source": "audio" if is_audio else "text",
+            **({"language_hint": hint} if hint else {}),
+        })
+        ctx = self.span.get_span_context()
+        self.trace_id = f"{ctx.trace_id:032x}" if ctx.is_valid else None
+        self.sse_counts: Counter[str] = Counter()
+
+    @contextmanager
+    def _child(self, name: str, attrs: dict[str, Any] | None = None) -> Iterator[trace.Span]:
+        """Дочерний span хода. Внутри блока нельзя делать yield наружу."""
+        with trace.use_span(
+            self.span, end_on_exit=False, record_exception=False, set_status_on_exception=False
+        ), span(name, {"session.id": self.sid, "turn.id": self.turn_id or None,
+                       **(attrs or {})}) as s:
+            yield s
+
+    def observe(self, event: BaseModel) -> None:
+        """Исходящее SSE-событие: счётчики по типу, первое событие, ошибки на span хода."""
+        if not self.sse_counts:
+            self.span.set_attribute("sse.first_event_ms", _ms(self.t0))
+        self.sse_counts[event.type] += 1
+        if isinstance(event, ErrorEvent):
+            self.span.add_event("error", {"error.code": event.code, "error.stage": event.stage,
+                                          "fatal": event.fatal})
+            if event.fatal:
+                _fail(self.span, event.stage, event.code, event.message)
+
+    def close(self) -> None:
+        if not self.finished:
+            self.span.add_event("cancelled")
+        self.span.set_attributes({f"sse.events.{t}": n for t, n in self.sse_counts.items()})
+        self.span.set_attributes({f"latency.{k}_ms": v for k, v in
+                                  self.latency.model_dump().items() if v is not None})
+        self.span.end()
 
     def _stage(self, name: str, start: float) -> int:
         ms = _ms(start)
@@ -311,16 +380,23 @@ class _Turn:
         # --- STT -------------------------------------------------------------
         if audio is not None:
             t = time.perf_counter()
-            try:
-                tr = await self.p.stt.transcribe(audio, mime, hint)
-            except ProviderUnavailable as e:
-                yield ErrorEvent(turn_id=0, stage="stt", code=e.code, message=e.message, fatal=True)
-                self.finished = True
-                return
-            except Exception:  # noqa: BLE001 — ошибка провайдера не роняет звонок
+            failure: tuple[str, str] | None = None
+            with self._child("stt", {"stt.provider": self.p.stt.name, "audio.mime": mime,
+                                     "audio.bytes": len(audio), "language_hint": hint}) as s:
+                try:
+                    tr = await self.p.stt.transcribe(audio, mime, hint)
+                except ProviderUnavailable as e:
+                    failure = (e.code, e.message)
+                except Exception:  # noqa: BLE001 — ошибка провайдера не роняет звонок
+                    failure = ("stt_failed", "Не удалось распознать аудио. Попробуйте текстовый ввод.")
+                if failure:
+                    _fail(s, "stt", *failure)
+                else:
+                    s.set_attributes({"stt.language": tr.language or "", "stt.chars": len(tr.text),
+                                      "local.transcript": tr.text})
+            if failure:
                 yield ErrorEvent(
-                    turn_id=0, stage="stt", code="stt_failed",
-                    message="Не удалось распознать аудио. Попробуйте текстовый ввод.", fatal=True
+                    turn_id=0, stage="stt", code=failure[0], message=failure[1], fatal=True
                 )
                 self.finished = True
                 return
@@ -330,8 +406,14 @@ class _Turn:
             tr = Transcript(text=text or "", language=hint)
             source = "text"
 
+        async with self.ctx.mutate(self.sid, author="system") as mutation:
+            mutation.focus_task(self.task_id)
         self.turn_id = await self.ctx.begin_turn(self.sid, tr.text, tr.language)
         snap = await self.ctx.snapshot(self.sid)
+        self.span.set_attributes({
+            "turn.id": self.turn_id, "call.generation": snap.generation,
+            "context.version": snap.context_version, "local.transcript": tr.text,
+        })
         yield TranscriptEvent(
             turn_id=self.turn_id, text=tr.text, language=tr.language, source=source
         )
@@ -347,52 +429,65 @@ class _Turn:
                 # --- роутер -------------------------------------------------------
                 t = time.perf_counter()
                 execution: Execution | None = None
-                try:
-                    rr = await self.p.router.route(tr.text, router_view(snap), kb)
-                    self.svc.last_router[self.sid] = rr
-                    if unknown := rr.output.unknown_ids(await kb.catalog.scenario_ids()):
-                        raise UnknownScenario(unknown)
-                except ProviderUnavailable as e:
+                failure: tuple[str, str, str] | None = None  # (code, message, ответ клиенту)
+                provider = self.p.router.name
+                with self._child("router", {
+                    "gen_ai.operation.name": "chat", "gen_ai.provider.name": provider,
+                    **({"gen_ai.request.model": "mock", "gen_ai.usage.input_tokens": 0,
+                        "gen_ai.usage.output_tokens": 0} if provider == "mock" else {}),
+                }) as s:
+                    try:
+                        rr = await self.p.router.route(tr.text, router_view(snap), kb)
+                        self.svc.last_router[self.sid] = rr
+                        if unknown := rr.output.unknown_ids(await kb.catalog.scenario_ids()):
+                            raise UnknownScenario(unknown)
+                        await self._decide(rr, snap.low_confidence_streak, kb)
+                    except ProviderUnavailable as e:
+                        failure = (e.code, e.message, e.message)
+                    except UnknownScenario as e:
+                        failure = ("router_invalid", str(e), "Не удалось надёжно определить запрос.")
+                    except Exception:  # noqa: BLE001
+                        failure = ("router_failed", "Не удалось определить запрос.", "Сервис временно недоступен.")
                     self.latency.router = self._stage("router", t)
-                    yield await self._error("router", e.code, e.message)
-                    execution = self._system_reply(e.message, tr.language or snap.language)
-                except UnknownScenario as e:
-                    self.latency.router = self._stage("router", t)
-                    yield await self._error("router", "router_invalid", str(e))
-                    execution = self._system_reply(
-                        "Не удалось надёжно определить запрос.", tr.language or snap.language
-                    )
-                except Exception:  # noqa: BLE001
-                    self.latency.router = self._stage("router", t)
-                    yield await self._error("router", "router_failed", "Не удалось определить запрос.")
-                    execution = self._system_reply(
-                        "Сервис временно недоступен.", tr.language or snap.language
-                    )
+                    if failure:
+                        _fail(s, "router", failure[0], failure[1])
+                    else:
+                        self._trace_router(s, rr)
+                if failure:
+                    yield await self._error("router", failure[0], failure[1])
+                    execution = self._system_reply(failure[2], tr.language or snap.language)
                 else:
-                    self.latency.router = self._stage("router", t)
                     self._alive()
-                    yield await self._routing(rr, snap.low_confidence_streak, kb)
+                    yield await self._routing()
 
                     # --- исполнитель: чтения и изменения контекста -------------------
                     t = time.perf_counter()
-                    try:
-                        execution = await self.p.executor.execute(
-                            TurnInput(
-                                session_id=self.sid,
-                                turn_id=self.turn_id,
-                                transcript=tr.text,
-                                router=rr.output,
-                                decision=self.decision,
-                                snapshot=snap,
-                                contexts=self.ctx,
-                                kb=kb,
+                    exec_error: str | None = None
+                    with self._child("executor", {"executor.name": self.p.executor.name,
+                                                  "router.decision": self.decision.kind}) as s:
+                        try:
+                            execution = await self.p.executor.execute(
+                                TurnInput(
+                                    session_id=self.sid,
+                                    turn_id=self.turn_id,
+                                    transcript=tr.text,
+                                    router=rr.output,
+                                    decision=self.decision,
+                                    snapshot=snap,
+                                    contexts=self.ctx,
+                                    kb=kb,
+                                )
                             )
-                        )
-                    except Exception:  # noqa: BLE001
+                        except Exception as e:  # noqa: BLE001
+                            exec_error = str(e)
+                            _fail(s, "executor", "executor_failed", exec_error)
+                            execution = self._system_reply(
+                                "Не получилось выполнить запрос.", rr.output.language
+                            )
+                        else:
+                            self._trace_execution(s, execution)
+                    if exec_error is not None:
                         yield await self._error("executor", "executor_failed", "Не удалось выполнить запрос.")
-                        execution = self._system_reply(
-                            "Не получилось выполнить запрос.", rr.output.language
-                        )
                     self.latency.reads = self._stage("reads", t)
 
                 self._alive()
@@ -456,16 +551,51 @@ class _Turn:
             yield await self._done(tr, reply)
         except _Cancelled:
             self.finished = True
+            self.span.add_event("cancelled")
             yield TurnCancelledEvent(turn_id=self.turn_id)
             return
         self.finished = True
         await self._log_timings()
 
-    async def _routing(self, rr: RouterResult, low_streak: int, kb: Any) -> RoutingEvent:
-        out = rr.output
-        self.router_out = out
+    async def _decide(self, rr: RouterResult, low_streak: int, kb: Any) -> None:
+        self.router_rr = rr
+        self.router_out = rr.output
         priorities = {s.scenario_id: s.priority for s in await kb.catalog.scenarios()}
-        self.decision = decide(out, priorities, low_streak)
+        self.decision = decide(rr.output, priorities, low_streak)
+
+    def _trace_router(self, s: trace.Span, rr: RouterResult) -> None:
+        out, d = rr.output, self.decision
+        top = (d.scenarios or out.scenarios)[0]
+        usage = getattr(rr, "usage", None) or {}
+        s.set_attributes({
+            "gen_ai.request.model": rr.model, "gen_ai.response.model": rr.model,
+            **{f"gen_ai.usage.{k}": v for k, v in usage.items()
+               if k in ("input_tokens", "output_tokens")},
+            "router.decision": d.kind, "router.scenario_id": top.scenario_id,
+            "router.confidence": top.confidence,
+            "router.alternatives": _json([a.model_dump() for a in out.alternatives]),
+            "router.language": out.language, "router.is_continuation": out.is_continuation,
+            "local.router.slots": _json(out.slots),  # слоты могут содержать телефон/ИИН
+            "local.prompt": rr.prompt, "local.raw_response": rr.raw,
+        })
+
+    def _trace_execution(self, s: trace.Span, execution: Execution) -> None:
+        s.set_attributes({
+            "scenario.id": execution.brief.scenario_id, "executor.decision":
+            execution.brief.decision, "executor.actions": len(execution.actions),
+            "executor.action_names": [a.name for a in execution.actions],
+            "executor.handoff": execution.brief.handoff is not None,
+        })
+        for a in execution.actions:  # действия уже выполнены исполнителем: span-отметки
+            with span("action", {"session.id": self.sid, "turn.id": self.turn_id,
+                                 "action.name": a.name, "action.mode": a.mode, "action.ok": a.ok,
+                                 "action.error": (a.error or {}).get("code")}) as act:
+                if not a.ok:
+                    _fail(act, "executor", (a.error or {}).get("code", "action_failed"))
+
+    async def _routing(self) -> RoutingEvent:
+        out = self.router_out
+        rr = self.router_rr
         payload = {
             "decision": self.decision.kind,
             "scenarios": [s.model_dump() for s in self.decision.scenarios],
@@ -517,6 +647,18 @@ class _Turn:
         out: asyncio.Queue = asyncio.Queue()
         sentences: asyncio.Queue = asyncio.Queue()
         t = time.perf_counter()
+        # responder — ребёнок turn с явным родителем; задачи ниже получают его как текущий span
+        resp = get_tracer().start_span(
+            "responder", context=trace.set_span_in_context(self.span), attributes={
+                "session.id": self.sid, "turn.id": self.turn_id,
+                "responder.name": "kernel" if use_kernel else self.p.responder.name,
+                "scenario.id": brief.scenario_id or "", "reply.language": brief.language,
+            },
+        )
+
+        def first_token() -> None:
+            self.latency.response_first_token = _ms(t)
+            resp.add_event("response_first_token", {"ms": self.latency.response_first_token})
 
         async def text_producer() -> None:
             if use_kernel:
@@ -525,7 +667,7 @@ class _Turn:
             full, buf, first = "", "", True
             async for delta in self.p.responder.stream(brief):
                 if first:
-                    self.latency.response_first_token = _ms(t)
+                    first_token()
                     first = False
                 full += delta
                 buf += delta
@@ -537,6 +679,7 @@ class _Turn:
                 await sentences.put((buf, None, None))
             await sentences.put(None)
             self.latency.response = self._stage("response", t)
+            resp.set_attribute("reply.chars", len(full))
             await out.put(ReplyDoneEvent(turn_id=self.turn_id, text=full, language=brief.language))
 
         async def kernel_text_producer() -> None:
@@ -559,10 +702,12 @@ class _Turn:
                 kind, payload = envelope["type"], envelope.get("payload", {})
                 response_id = envelope.get("response_id") or response_id
                 segment_id = envelope.get("segment_id")
+                if response_id:
+                    resp.set_attribute("response.id", response_id)
                 if kind == "response.delta":
                     delta = payload["text"]
                     if first:
-                        self.latency.response_first_token = _ms(t)
+                        first_token()
                         first = False
                     full += delta
                     if segment_id:
@@ -591,19 +736,33 @@ class _Turn:
                 )
             await sentences.put(None)
             self.latency.response = self._stage("response", t)
+            resp.set_attribute("reply.chars", len(full))
             await out.put(ReplyDoneEvent(
                 turn_id=self.turn_id, text=full, language=brief.language,
                 response_id=response_id,
             ))
 
         async def audio_producer() -> None:
-            seq = 0
-            while (job := await sentences.get()) is not None:
+            seq = 0  # номер отданного аудио; tts.seq — номер предложения, даже без аудио
+            for index in itertools.count():
+                if (job := await sentences.get()) is None:
+                    break
                 sentence, response_id, segment_id = job
-                try:
-                    chunk = await self.p.tts.synthesize(sentence.strip(), brief.language)
-                except Exception as e:  # noqa: BLE001
-                    await out.put(await self._error("tts", "tts_failed", str(e)))
+                with span("tts.sentence", {
+                    "session.id": self.sid, "turn.id": self.turn_id, "tts.seq": index,
+                    "tts.chars": len(sentence.strip()), "tts.provider": self.p.tts.name,
+                    "response.id": response_id, "segment.id": segment_id,
+                }) as ts:
+                    try:
+                        chunk = await self.p.tts.synthesize(sentence.strip(), brief.language)
+                    except Exception as e:  # noqa: BLE001
+                        _fail(ts, "tts", "tts_failed", str(e))
+                        chunk = e
+                    else:
+                        ts.set_attributes({"audio.mime": chunk.mime, "audio.bytes": len(chunk.data)}
+                                          if chunk is not None else {"tts.skipped": True})
+                if isinstance(chunk, Exception):
+                    await out.put(await self._error("tts", "tts_failed", "Не удалось озвучить часть ответа."))
                     continue
                 if chunk is None:
                     continue
@@ -629,9 +788,12 @@ class _Turn:
                     tg.create_task(text_producer())
                     tg.create_task(audio_producer())
             except* _Cancelled:
+                resp.add_event("cancelled")
                 await out.put(TurnCancelledEvent(turn_id=self.turn_id))
             except* Exception as eg:  # noqa: BLE001 — ошибка ответа не роняет звонок
                 error = eg.exceptions[0]
+                _fail(resp, "responder", error.code if isinstance(error, ProviderUnavailable)
+                      else "responder_failed", str(error))
                 await out.put(
                     ErrorEvent(
                         turn_id=self.turn_id,
@@ -646,7 +808,8 @@ class _Turn:
             finally:
                 await out.put(None)
 
-        task = asyncio.create_task(run_all())
+        with trace.use_span(resp, end_on_exit=False):  # задача копирует контекст при создании
+            task = asyncio.create_task(run_all())
         self.svc._speech_tasks[(self.sid, self.turn_id)] = task
         finished = False
         try:
@@ -657,6 +820,9 @@ class _Turn:
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+            if not finished and not self.finished:
+                resp.add_event("cancelled")
+            resp.end()
             self.svc._speech_tasks.pop((self.sid, self.turn_id), None)
             if not finished and not self.finished and use_kernel:
                 with anyio.CancelScope(shield=True):
@@ -678,6 +844,7 @@ class _Turn:
             reply=reply,
             latency_ms=self.latency,
             context_version=snap.context_version,
+            trace_id=self.trace_id,
         )
 
     async def _log_timings(self) -> None:

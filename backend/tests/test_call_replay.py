@@ -16,7 +16,7 @@ from test_call_kernel import TTS, Executor, Router
 from app.call import CallService, build_providers
 from app.call.api import router as call_router
 from app.config import settings
-from app.context import Contexts, MemoryStore, PgStore
+from app.context import Contexts, Fact, MemoryStore, PgStore
 from app.kernel import KernelError, Repository, Runtime
 from app.kernel.provider import BackgroundResult, SegmentResult
 from app.knowledge import Knowledge, ensure_loaded
@@ -145,6 +145,39 @@ def test_text_duplicate_and_cursor_replay_do_not_repeat_router_or_tts(monkeypatc
             await calls.contexts.start_call(sid)
             assert events(await client.get(f"/calls/{sid}/events")) == []
             assert (await client.post(path, json=payload)).status_code == 409
+
+    asyncio.run(run())
+
+
+def test_task_switch_scopes_router_before_routing_and_restores_previous_domain(monkeypatch):
+    async def run():
+        async with system(monkeypatch, Driver()) as (calls, _runtime, client, _counts, _sessions):
+            sid, seen = str(uuid4()), []
+
+            class InspectRouter(Router):
+                async def route(self, text, view, kb):
+                    seen.append(view)
+                    return await super().route(text, view, kb)
+
+            calls.providers.router = InspectRouter()
+            path = f"/calls/{sid}/turns/text"
+            for task, text in [("claim-a", "Первый вопрос A"), ("claim-b", "Вопрос B"),
+                               ("claim-a", "Вернуться к A")]:
+                response = await client.post(path, json={"task_id": task, "text": text})
+                assert events(response)[-1]["type"] == "turn.done"
+                if text == "Первый вопрос A":
+                    async with calls.contexts.mutate(sid) as mutation:
+                        mutation.switch_topic("SC17")
+                        mutation.set_slots("SC17", {"claim_ref": "PRIVATE_CLAIM_A"})
+                        mutation.add_facts([Fact(key="claim.status", value="PRIVATE_FACT_A",
+                                                source="get_claim", source_id="CLAIM_A")])
+            assert seen[1]["active_task_id"] == "claim-b"
+            assert not seen[1]["known_slots"] and not seen[1]["facts"]
+            assert "Первый вопрос A" not in json.dumps(seen[1], ensure_ascii=False)
+            assert seen[2]["active_task_id"] == "claim-a"
+            assert seen[2]["known_slots"]["SC17"]["claim_ref"] == "PRIVATE_CLAIM_A"
+            assert seen[2]["facts"][0]["value"] == "PRIVATE_FACT_A"
+            assert "Вопрос B" not in json.dumps(seen[2], ensure_ascii=False)
 
     asyncio.run(run())
 

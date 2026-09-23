@@ -1,7 +1,8 @@
 """Kernel adapter over the existing Contexts owner and its session/board storage."""
 
-from app.context import Contexts, PgStore, SessionNotFound
+from app.context import Contexts, PgStore, SessionNotFound, conversation_history, ensure_blackboard
 from app.db import SessionLocal
+from app.kernel.journal import KernelJournal
 
 
 class KernelError(Exception):
@@ -19,19 +20,36 @@ class Repository:
     def __init__(self, sessions=SessionLocal, *, contexts: Contexts | None = None):
         self.sessions = sessions  # compatibility for isolated integration-test cleanup
         self.contexts = contexts if contexts is not None else Contexts(PgStore(sessions))
+        self.contexts.attach_runtime(KernelJournal())
 
     async def create(self, agents, context, mode, session_id=None):
-        return await self.contexts.kernel_create(agents, context, mode, session_id)
+        state = await self.contexts.kernel_create(agents, context, mode, session_id)
+        return await self.get(state["session_id"])
 
-    async def change(self, sid, apply):
+    async def change(self, sid, apply, *, durable=True):
+        def owned(state, seq):
+            generation = state["generation"]
+            ensure_blackboard(state)
+            result = apply(state, seq)
+            if state["generation"] != generation:
+                raise ValueError("Runtime generation must match its owning context")
+            return result
+
         try:
-            return await self.contexts.kernel_change(sid, apply)
+            return await self.contexts.kernel_change(sid, owned, durable=durable)
         except SessionNotFound:
             raise KernelError("session_not_found", "Сессия не найдена", 404) from None
 
     async def get(self, sid):
         try:
-            return await self.contexts.kernel_get(sid)
+            # One detached snapshot keeps domain and runtime history on the same revision.
+            context = await self.contexts.snapshot(sid)
+            if not context.kernel:
+                raise SessionNotFound(sid)
+            state = context.kernel
+            ensure_blackboard(state)
+            state["conversation_history"] = conversation_history(context)
+            return state
         except SessionNotFound:
             raise KernelError("session_not_found", "Сессия не найдена", 404) from None
 

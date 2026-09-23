@@ -240,5 +240,21 @@ def test_interrupt_previous_is_atomic_idempotent_and_blocks_late_delta():
             assert "LATE_DELTA" not in str(events)
             stops = [item for item in events if item["type"] == "response.interrupted"]
             assert len(stops) == 1
+            # Explicit null is shared scope; omitted scope means the current task.
+            shared = TurnRequest.model_validate({**request.model_dump(), "updates": [
+                {"key": "city", "value": "Astana", "task_id": None},
+            ]})
+            with pytest.raises(KernelError, match="request_id"):
+                await runtime.submit(sid, shared)
+            ingress_id = uuid4()
+            await runtime.update_inputs(sid, request_id=ingress_id,
+                                        updates=[{"key": "city", "value": "Almaty"}])
+            with pytest.raises(KernelError, match="request_id"):
+                await runtime.update_inputs(sid, request_id=ingress_id, updates=[
+                    {"key": "city", "value": "Almaty", "task_id": None},
+                ])
+            with pytest.raises(KernelError) as unknown:
+                await runtime.list_records(sid, "nonexistent-task")
+            assert unknown.value.status == 404
 
     asyncio.run(run())

@@ -1,7 +1,8 @@
 """Contexts — единственный писатель состояния сессий (ADR 0003, 0006).
 
 Одна сессия — один asyncio.Lock: проверка версии и запись атомарны.
-Память процесса — источник истины, каждое изменение сразу уходит в store одной транзакцией.
+Память процесса — источник истины, каждое изменение сразу уходит в store одной транзакцией
+(runtime_change(durable=False) пишет только журнал; снимок догоняет следующая durable-запись).
 """
 
 import asyncio
@@ -12,10 +13,8 @@ from contextlib import asynccontextmanager
 from copy import deepcopy
 from typing import Any
 
-from app.context.blackboard import ensure_blackboard
-from app.context.history import conversation_history
-from app.context.kernel import append_kernel, new_kernel, reset_kernel
 from app.context.mutation import Mutation
+from app.context.runtime import CURSOR, JOURNAL, RuntimeOwner, journal, replace_slot, reset_slot
 from app.context.store import ContextStore
 from app.context.types import (
     Author,
@@ -30,23 +29,26 @@ from app.context.types import (
 ResetHook = Callable[[str, int], Any]  # (session_id, new_generation)
 
 
-def _kernel_snapshot(state: SessionContext) -> dict:
-    result = deepcopy(state.kernel)
-    ensure_blackboard(result)
-    result["conversation_history"] = conversation_history(state)
-    return result
-
-
 class Contexts:
     def __init__(self, store: ContextStore) -> None:
         self._store = store
         self._states: dict[str, SessionContext] = {}
         self._locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._reset_hooks: list[ResetHook] = []
+        self._owner: RuntimeOwner | None = None
 
     def on_reset(self, hook: ResetHook) -> None:
         """Вызывается после нового звонка / смены клиента. Фон отменяет здесь свои задачи."""
         self._reset_hooks.append(hook)
+
+    def attach_runtime(self, owner: RuntimeOwner) -> None:
+        """Runtime (kernel) that shapes the opaque `SessionContext.kernel` slot and its journal."""
+        self._owner = owner
+
+    def _runtime_owner(self) -> RuntimeOwner:
+        if self._owner is None:
+            raise RuntimeError("no runtime owner attached to Contexts")
+        return self._owner
 
     # --- ядро ----------------------------------------------------------------
 
@@ -56,10 +58,18 @@ class Contexts:
         except KeyError:
             raise SessionNotFound(session_id) from None
 
+    async def _fetch(self, session_id: str) -> SessionContext | None:
+        """Stored snapshot; the journal cursor may be ahead of it after non-durable appends."""
+        state = await self._store.load(session_id)
+        if state is not None and state.kernel:
+            cursor = await self._store.journal_cursor(session_id)
+            state.kernel[CURSOR] = max(state.kernel.get(CURSOR, 0), cursor)
+        return state
+
     async def _load_locked(self, session_id: str) -> SessionContext:
         """Called while holding the one Contexts lock for this session."""
         if session_id not in self._states:
-            state = await self._store.load(session_id)
+            state = await self._fetch(session_id)
             if state is None:
                 raise SessionNotFound(session_id)
             self._states[session_id] = state
@@ -87,7 +97,7 @@ class Contexts:
             state, raw = m.finalize()
             entries = [BoardEntry(**e) for e in raw]
             if m.reset_happened:
-                entries.extend(reset_kernel(cur, state))
+                entries.extend(reset_slot(self._owner, cur, state))
             await self._store.save(state, entries)
             self._states[session_id] = state
         if m.reset_happened:
@@ -104,7 +114,7 @@ class Contexts:
         """Новый звонок: чистый контекст. Для существующей сессии — новое поколение."""
         session_id = session_id or uuid.uuid4().hex
         async with self._locks[session_id]:
-            before = self._states.get(session_id) or await self._store.load(session_id)
+            before = self._states.get(session_id) or await self._fetch(session_id)
             if before is not None:
                 m = Mutation(before.model_copy(deep=True), before.turn_id, "system")
                 m.reset("new_call")
@@ -115,7 +125,7 @@ class Contexts:
             state, raw = m.finalize()
             entries = [BoardEntry(**e) for e in raw]
             if before is not None:
-                entries.extend(reset_kernel(before, state))
+                entries.extend(reset_slot(self._owner, before, state))
             await self._store.save(state, entries)
             self._states[session_id] = state
         if before is not None:
@@ -216,75 +226,106 @@ class Contexts:
         self, session_id: str, since_turn: int | None = None, *, include_internal: bool = False
     ) -> list[BoardEntry]:
         entries = await self._store.board(session_id, since_turn)
-        return [entry for entry in entries if include_internal or entry.type != "kernel"
+        return [entry for entry in entries if include_internal or entry.type != JOURNAL
                 or entry.payload.get("visibility") == "public"]
 
-    # --- public runtime storage API -----------------------------------------
+    # --- runtime slot + journal (the owner shapes both, see runtime.py) -------
 
-    async def kernel_create(
-        self, agents: list, context: dict, mode: str, session_id: str | None = None
-    ) -> dict:
-        """Attach runtime state to this call without introducing a second session writer."""
+    async def runtime_create(self, session_id: str | None, spec: dict) -> dict:
+        """Attach a runtime to this call without introducing a second session writer.
+
+        Idempotent while the slot is active; otherwise the owner builds a fresh slot.
+        """
+        owner = self._runtime_owner()
+        key, value = owner.active
         session_id = session_id or str(uuid.uuid4())
         did_reset = False
         async with self._locks[session_id]:
-            current = self._states.get(session_id) or await self._store.load(session_id)
-            if current is not None and current.kernel.get("status") == "open":
+            current = self._states.get(session_id) or await self._fetch(session_id)
+            if current is not None and current.kernel.get(key) == value:
                 self._states[session_id] = current
-                return _kernel_snapshot(current)
+                return deepcopy(current.kernel)
             state = current.model_copy(deep=True) if current else SessionContext(session_id=session_id)
             entries = []
-            if state.kernel.get("status") == "closed" and state.kernel.get("messages"):
-                # Reopening a manually closed call must reject cancellation-resistant old work.
-                # A preceding context reset already advanced the generation and cleared messages.
+            if state.kernel and owner.restarts_generation(state.kernel):
                 mutation = Mutation(state, state.turn_id, "system")
                 mutation.reset("new_call")
                 state, raw = mutation.finalize()
                 entries = [BoardEntry(**entry) for entry in raw]
-                entries.extend(reset_kernel(current, state))
+                entries.extend(reset_slot(owner, current, state))
                 did_reset = True
-            state.kernel = new_kernel(state, agents, context, mode)
-            _, created = append_kernel(state, [{
-                "type": "session.created", "payload": {"mode": mode},
-                "author": "scheduler", "visibility": "public",
-            }])
-            await self._store.save(state, entries + created)
+            slot, events = owner.initial(state, spec)
+            entries.extend(replace_slot(owner, state, slot, events, state.kernel.get(CURSOR, 0)))
+            await self._store.save(state, entries)
             self._states[session_id] = state
-            result = _kernel_snapshot(state)
+            result = deepcopy(state.kernel)
         if did_reset:
             for hook in self._reset_hooks:
                 hook(session_id, state.generation)
         return result
 
-    async def kernel_get(self, session_id: str) -> dict:
+    async def runtime_get(self, session_id: str) -> dict:
         async with self._locks[session_id]:
             state = await self._load_locked(session_id)
             if not state.kernel:
                 raise SessionNotFound(session_id)
-            return _kernel_snapshot(state)
+            return deepcopy(state.kernel)
 
-    async def kernel_change(self, session_id: str, apply: Callable) -> tuple[Any, list[dict]]:
-        """Pure synchronous mutation + event append, committed under the shared context lock."""
+    async def runtime_change(
+        self, session_id: str, apply: Callable, *, durable: bool = True
+    ) -> tuple[Any, list[dict]]:
+        """Pure synchronous slot mutation + journal append, under the shared context lock.
+
+        durable=False: only the journal rows are written; the slot snapshot is persisted by the
+        next durable write of this session (in memory it is current immediately).
+        """
+        owner = self._runtime_owner()
         async with self._locks[session_id]:
             current = await self._load_locked(session_id)
             if not current.kernel:
                 raise SessionNotFound(session_id)
             state = current.model_copy(deep=True)
-            ensure_blackboard(state.kernel)
-            sequence = state.kernel["last_seq"]
-            result, pending = apply(state.kernel, sequence)
-            if state.kernel["generation"] != state.generation:
-                raise ValueError("Runtime generation must match its owning context")
-            state.kernel["last_seq"] = sequence
-            envelopes, entries = append_kernel(state, pending)
-            await self._store.save(state, entries)
+            cursor = state.kernel[CURSOR]
+            result, events = apply(state.kernel, cursor)
+            state.kernel[CURSOR] = cursor
+            entries = journal(owner, state, events)
+            if durable:
+                await self._store.save(state, entries)
+            else:
+                await self._store.append(entries)
             self._states[session_id] = state
-            return deepcopy(result), deepcopy(envelopes)
+            return deepcopy(result), [deepcopy(entry.payload) for entry in entries]
+
+    async def runtime_events(
+        self, session_id: str, after: int = 0, *, public: bool = True, limit: int = 200
+    ) -> list[dict]:
+        return await self._store.journal(session_id, after, public=public, limit=limit)
+
+    async def runtime_active_sessions(self) -> list[str]:
+        key, value = self._runtime_owner().active
+        return await self._store.runtime_sessions(key, value)
+
+    # --- compatibility names used by kernel.Repository ------------------------
+
+    async def kernel_create(
+        self, agents: list, context: dict, mode: str, session_id: str | None = None
+    ) -> dict:
+        return await self.runtime_create(
+            session_id, {"agents": agents, "context": context, "mode": mode}
+        )
+
+    async def kernel_get(self, session_id: str) -> dict:
+        return await self.runtime_get(session_id)
+
+    async def kernel_change(
+        self, session_id: str, apply: Callable, *, durable: bool = True
+    ) -> tuple[Any, list[dict]]:
+        return await self.runtime_change(session_id, apply, durable=durable)
 
     async def kernel_events(
         self, session_id: str, after: int = 0, *, public: bool = True, limit: int = 200
     ) -> list[dict]:
-        return await self._store.kernel_events(session_id, after, public=public, limit=limit)
+        return await self.runtime_events(session_id, after, public=public, limit=limit)
 
     async def kernel_open_sessions(self) -> list[str]:
-        return await self._store.kernel_open_sessions()
+        return await self.runtime_active_sessions()

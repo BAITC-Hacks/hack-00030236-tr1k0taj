@@ -7,6 +7,11 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+
+from app.tracer import get_tracer
+
 Emit = Callable[[str], Awaitable[None]]
 ToolRunner = Callable[[str, dict], Awaitable[dict]]
 KINDS = ["kb", "office", "clinic", "inspection_point"]
@@ -308,6 +313,28 @@ def _get(item: Any, key: str, default: Any = None) -> Any:
     return item.get(key, default) if isinstance(item, dict) else getattr(item, key, default)
 
 
+def _llm_span(model: str, round_index: int, name: str, completed: Any = None):
+    """Span `llm.call` одного раунда Responses API (GenAI semconv); completed=None → открыт."""
+    parent = getattr(trace.get_current_span(), "attributes", None) or {}
+    s = get_tracer().start_span("llm.call", attributes={k: parent[k] for k in ("session.id",
+        "turn.id") if k in parent} | {"gen_ai.operation.name": "chat", "gen_ai.request.model":
+        model, "gen_ai.provider.name": "mock" if model == "mock" else "openai", "llm.round":
+        round_index, "llm.schema": name})
+    return _llm_end(s, completed) if completed is not None else s
+
+
+def _llm_end(s, completed: Any) -> None:
+    usage, output = _get(completed, "usage"), _get(completed, "output", []) or []
+    s.set_attributes({"gen_ai.response.model": _get(completed, "model") or "", "llm.tool_calls": [
+        _get(i, "name", "") for i in output if _get(i, "type") == "function_call"],
+        "gen_ai.usage.input_tokens": _get(usage, "input_tokens", 0) or 0,
+        "gen_ai.usage.output_tokens": _get(usage, "output_tokens", 0) or 0})
+    if completed == {}:
+        s.set_status(Status(StatusCode.ERROR, "model_stream_incomplete"))
+        s.set_attributes({"error.code": "model_stream_incomplete", "error.stage": "llm"})
+    s.end()
+
+
 def _dump(item: Any) -> dict:
     return item if isinstance(item, dict) else item.model_dump(mode="json", exclude_none=True)
 
@@ -390,6 +417,7 @@ class ModelDriver:
                 decoder = _TextDecoder() if emit else None
                 raw = ""
                 completed = None
+                llm = _llm_span(self.model, round_index, name)
                 stream = await self._client.responses.create(
                     model=self.model,
                     instructions=instructions,
@@ -424,6 +452,7 @@ class ModelDriver:
                             raise ProviderError("model_refusal")
                 finally:
                     await stream.close()
+                    _llm_end(llm, completed or {})
                 if completed is None:
                     raise ProviderError("model_stream_incomplete")
                 output = _get(completed, "output", [])
@@ -453,6 +482,7 @@ class ModelDriver:
         self, context: dict, emit: Emit, tool_runner: ToolRunner
     ) -> SegmentResult:
         if self.mock:
+            _llm_span("mock", 0, "voice_segment", {"model": "mock"})
             first = context.get("segment_index", 0) == 0
             if first:
                 text = "Демонстрационный режим без LLM: проверяю доступность страховых материалов. "
@@ -483,6 +513,7 @@ class ModelDriver:
         allowed = set(agent.get("tools", [tool["name"] for tool in TOOLS]))
         allowed.intersection_update(tool["name"] for tool in TOOLS)
         if self.mock:
+            _llm_span("mock", 0, "background_result", {"model": "mock"})
             result = {}
             if "rag_search" in allowed:
                 result = await tool_runner(

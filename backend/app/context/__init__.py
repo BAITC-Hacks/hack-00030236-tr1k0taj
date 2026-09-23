@@ -19,6 +19,7 @@ from app.context.blackboard import (
 from app.context.history import conversation_history, delivery, kernel_history
 from app.context.models import SessionRow as SessionRecord
 from app.context.mutation import Mutation
+from app.context.runtime import RuntimeOwner
 from app.context.service import Contexts
 from app.context.store import ContextStore, MemoryStore, PgStore
 from app.context.types import (
@@ -47,6 +48,7 @@ __all__ = [
     "PatchResult",
     "PendingConfirmation",
     "PgStore",
+    "RuntimeOwner",
     "SessionContext",
     "SessionNotFound",
     "SessionRecord",

@@ -51,6 +51,7 @@ class Turn(BaseModel):
     role: Literal["client", "bot"]
     text: str
     language: str | None = None
+    task_id: str = "default"
 
 
 class SessionContext(BaseModel):
@@ -70,6 +71,8 @@ class SessionContext(BaseModel):
     history: list[Turn] = []
     low_confidence_streak: int = 0
     cancelled_turns: list[int] = []
+    domain_task_id: str = "default"
+    task_states: dict[str, dict[str, Any]] = Field(default_factory=dict, exclude=True, repr=False)
     # Runtime projection is persisted by ContextStore, never serialized into public /context.
     kernel: dict[str, Any] = Field(default_factory=dict, exclude=True, repr=False)
     call_journal: dict[str, Any] = Field(default_factory=dict, exclude=True, repr=False)

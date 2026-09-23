@@ -8,6 +8,7 @@ import time
 from copy import deepcopy
 from typing import Any
 
+from app.context.blackboard import MAX_TASKS, _task_id
 from app.context.types import (
     Author,
     EntryType,
@@ -20,6 +21,8 @@ from app.context.types import (
 
 LOW_CONFIDENCE = 0.45
 HISTORY_LIMIT = 20
+TASK_FIELDS = {"active_scenario", "pending_topics", "slots_by_topic", "pending_confirmation",
+               "facts", "low_confidence_streak"}
 
 
 def now_ms() -> int:
@@ -105,6 +108,7 @@ class Mutation:
             turn_id=old.turn_id,
             language=old.language,
             history=keep,
+            domain_task_id=old.domain_task_id if reason == "client_changed" else "default",
             call_journal=deepcopy(old.call_journal),
         )
         self._new_facts.clear()
@@ -115,7 +119,8 @@ class Mutation:
     # --- ходы (без версии) ------------------------------------------------
 
     def add_turn(self, role: str, text: str, language: str | None) -> None:
-        self._s.history.append(Turn(turn_id=self.turn_id, role=role, text=text, language=language))
+        self._s.history.append(Turn(turn_id=self.turn_id, role=role, text=text, language=language,
+                                    task_id=self._s.domain_task_id))
         del self._s.history[:-HISTORY_LIMIT]
         if role == "client" and language:
             self._s.language = language
@@ -128,6 +133,24 @@ class Mutation:
         self.entry("routing", payload, confidence=confidence)
 
     # --- значимые изменения ----------------------------------------------
+
+    def focus_task(self, task_id: str) -> None:
+        """Switch the domain adapter's task without carrying slots or confirmation across tasks."""
+        _task_id(task_id)
+        state = self._s
+        if task_id == state.domain_task_id:
+            return
+        if len(set(state.task_states) | {state.domain_task_id, task_id}) > MAX_TASKS:
+            raise ValueError("task_limit")
+        restored = SessionContext(session_id=state.session_id, **state.task_states.get(task_id, {}))
+        for fact in self._new_facts:
+            fact.context_version = state.context_version + 1
+        state.task_states[state.domain_task_id] = state.model_dump(mode="json", include=TASK_FIELDS)
+        for field in TASK_FIELDS:
+            setattr(state, field, deepcopy(getattr(restored, field)))
+        previous, state.domain_task_id = state.domain_task_id, task_id
+        self._changed()
+        self.entry("call", {"status": "task_focused", "task_id": task_id, "previous_task_id": previous})
 
     def set_client(self, client_id: str) -> None:
         """None→X: идентификация. X→Y: другой клиент, новое поколение."""

@@ -133,7 +133,7 @@ backend). `cancel`, `playback`, `router/last` по незнакомому UUID �
 | `audio` | озвучено очередное предложение | `seq`, `mime`, `data` (base64), `text` |
 | `error` | ошибка этапа | `stage`, `code`, `message`, `fatal` |
 | `turn.cancelled` | ход остановлен | — |
-| `turn.done` | конец хода | трассировка по формату README кита: `transcript`, `language`, `scenarios`, `alternatives`, `reason`, `slots`, `actions`, `latency_ms{stt, router, reads, response_first_token, response, tts_first_audio, total}`, `context_version` |
+| `turn.done` | конец хода | трассировка по формату README кита: `transcript`, `language`, `scenarios`, `alternatives`, `reason`, `slots`, `actions`, `latency_ms{stt, router, reads, response_first_token, response, tts_first_audio, total}`, `context_version`, `trace_id` (32 hex или `null`) |
 
 Ответ роутера — формат README кита (он главнее спеки 4.1): `scenarios` — список объектов
 `{scenario_id, confidence, reason}`, первым полем. Неизвестный `scenario_id` → ошибка `router_invalid`, не «похожий».
@@ -143,6 +143,27 @@ backend). `cancel`, `playback`, `router/last` по незнакомому UUID �
 
 Замеры (`latency_ms`) — время каждого этапа отдельно. `total` — от приёма запроса до первого аудио
 (или до `reply.done`, если TTS выключен). Время в браузере (конец речи → начало звука) присылает фронт в `/playback`.
+
+### Трассировка (ADR 0013, [tracer-module.md](tracer-module.md))
+
+Любой запрос может нести W3C `traceparent`; ответ всегда отдаёт `traceparent` и `x-trace-id`.
+`turn.done.trace_id` = `x-trace-id` хода. `cancel` и `playback` фронт шлёт с `traceparent` из ответа
+хода: их SERVER span попадает в ту же трассу с событием `cancel` / `playback` (замеры браузера).
+
+Атрибуты, которые пишет `call` (все span'ы несут `session.id`, после начала хода — `turn.id`):
+- SERVER: `http.request.body.size`, `http.request.header.content_type`, `user_agent.original`,
+  `input.source`, `language_hint`, для аудио `audio.mime|bytes|filename`;
+- `turn`: `call.generation`, `context.version`, `local.transcript`, `sse.first_event_ms`,
+  `sse.events.<type>`, `latency.<stage>_ms` (как `latency_ms`), события `error`, `cancelled`;
+- `stt`: `stt.provider`, `stt.language`, `stt.chars`, `local.transcript`;
+- `router`: `gen_ai.*`, `router.decision|scenario_id|confidence|alternatives|language|is_continuation`,
+  `local.router.slots`, `local.prompt`, `local.raw_response`;
+- `executor` (+ дочерние `action`: `action.name|mode|ok|error`): `scenario.id`, `executor.actions`;
+- `responder`: `responder.name`, `response.id`, `reply.chars`, событие `response_first_token`;
+  под ним kernel `segment` (`segment.id|index|used_source_ids`) → `llm.call` (`gen_ai.usage.*`),
+  `rag.search` / `kb.read`; `tts.sentence`: `tts.seq`, `tts.chars`, `audio.mime`, `audio.bytes`.
+- Ошибка этапа: статус ERROR + `error.code`, `error.stage`. Фоновые `agent.run` — отдельные трассы
+  с link на ход. STT идёт до `begin_turn`, поэтому у `stt` нет `turn.id`.
 
 ## Порты этапов
 

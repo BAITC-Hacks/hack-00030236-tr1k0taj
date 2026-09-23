@@ -9,8 +9,9 @@ import app.kernel.models
 import app.knowledge.models  # noqa: F401
 from app.config import settings
 from app.db import Base
+from app.tracer import trace_metadata
 
-target_metadata = Base.metadata
+target_metadata = [Base.metadata, trace_metadata]
 
 
 def do_run_migrations(connection):

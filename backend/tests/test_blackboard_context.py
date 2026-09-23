@@ -5,6 +5,7 @@ import pytest
 
 from app.context import (
     Contexts,
+    Fact,
     MemoryStore,
     SessionContext,
     Turn,
@@ -19,6 +20,7 @@ from app.context import (
     select_records,
     update_task,
 )
+from app.kernel import Repository
 
 
 def test_replacement_invalidates_only_dependent_records_and_guards_writes():
@@ -142,7 +144,8 @@ def test_canonical_history_unifies_domain_runtime_and_delivery():
     assert [s["delivery"]["status"] for s in response["segments"]] == ["heard", "partially_heard"]
     assert response["segments"][1]["text"] == "Whole partial sentence."
     assert history[-1]["text"] == "Goodbye" and history[-1]["delivery"]["status"] == "unknown"
-    assert router_view(context)["recent_turns"] == history
+    assert router_view(context)["recent_turns"] == history[2:]
+    assert router_view(context, task_id="claim")["recent_turns"] == history[:2]
     assert handoff_summary(context)["conversation_history"] == history
     assert kernel_history(context.kernel)[1] == response
 
@@ -151,17 +154,20 @@ def test_context_projection_and_call_ledger_stay_private_and_reload():
     async def run():
         store = MemoryStore()
         contexts = Contexts(store)
-        state = await contexts.kernel_create([], {}, "mock", session_id="s")
+        repository = Repository(contexts=contexts)
+        state = await repository.create([], {}, "mock", session_id="s")
         await contexts.begin_turn("s", "Claim question")
         async with contexts.mutate("s") as mutation:
             mutation.ctx.call_journal = {"seq": 5, "requests": {"secret-request": {"status": "done"}}}
         def publish(kernel, seq):
             return put_record(kernel, key="city", value="Almaty", task_id="default")
 
-        await contexts.kernel_change("s", publish)
-        fresh = await Contexts(store).kernel_get("s")
+        await repository.change("s", publish)
+        fresh = await Repository(contexts=Contexts(store)).get("s")
         assert fresh["conversation_history"][0]["text"] == "Claim question"
         assert fresh["last_seq"] > state["last_seq"]
+        assert "conversation_history" not in await contexts.runtime_get("s")
+        assert "conversation_history" not in store.states["s"].kernel
         public = (await contexts.snapshot("s")).model_dump()
         assert "kernel" not in public and "call_journal" not in public
         assert all(row.payload.get("type") != "blackboard.updated" for row in await contexts.board("s"))
@@ -178,9 +184,79 @@ def test_template_history_keeps_task_scope_and_rejects_old_generation_map():
         Turn(turn_id=2, role="client", text="General question"),
     ], kernel={"generation": 2, "turn_tasks": {"1": "claim"}})
     history = conversation_history(context)
-    assert [item["task_id"] for item in history] == ["claim", "claim", None]
+    assert [item["task_id"] for item in history] == ["claim", "claim", "default"]
     assert [item["text"] for item in history if (item["task_id"] or "default") == "default"] == [
         "General question",
     ]
     context.kernel["generation"] = 1
-    assert all(item["task_id"] is None for item in conversation_history(context))
+    assert all(item["task_id"] == "default" for item in conversation_history(context))
+
+
+def test_context_runtime_slot_stays_opaque_to_blackboard_projection():
+    class Owner:
+        active = ("alive", True)
+
+        def initial(self, _context, _spec):
+            return {"alive": True, "custom": "initial"}, []
+
+        def restarts_generation(self, _slot):
+            return False
+
+    async def run():
+        contexts = Contexts(MemoryStore())
+        contexts.attach_runtime(Owner())
+        created = await contexts.runtime_create("opaque", {})
+        assert created == {"alive": True, "custom": "initial", "last_seq": 0}
+
+        def change(slot, _seq):
+            slot["custom"] = "updated"
+            return None, []
+
+        await contexts.runtime_change("opaque", change)
+        loaded = await contexts.runtime_get("opaque")
+        assert loaded == {"alive": True, "custom": "updated", "last_seq": 0}
+        assert "blackboard" not in (await contexts.snapshot("opaque")).kernel
+
+    asyncio.run(run())
+
+
+def test_domain_tasks_restore_confirmation_and_keep_router_history_isolated():
+    async def run():
+        store = MemoryStore()
+        contexts = Contexts(store)
+        await contexts.start_call("s")
+        async with contexts.mutate("s") as mutation:
+            mutation.set_client("C004")
+            mutation.focus_task("claim")
+            mutation.switch_topic("SC17")
+            mutation.set_slots("SC17", {"claim_number": "CL-500311"})
+            mutation.add_facts([Fact(key="claim.status", value="requested", source="get_claim")])
+            mutation.request_confirmation("send_documents", {"claim_number": "CL-500311"})
+            mutation.record_routing({}, 0.2)
+        await contexts.begin_turn("s", "Claim question", "ru")
+        claim = await contexts.snapshot("s")
+        async with contexts.mutate("s") as mutation:
+            mutation.focus_task("policy")
+        await contexts.begin_turn("s", "Policy question", "kk")
+        policy = await contexts.snapshot("s")
+        view = router_view(policy)
+        assert policy.client_id == "C004" and policy.language == "kk"
+        assert view["known_slots"] == {} and view["facts"] == []
+        assert view["pending_confirmation"] is None and policy.low_confidence_streak == 0
+        assert [item["text"] for item in view["recent_turns"]] == ["Policy question"]
+        assert "task_states" not in policy.model_dump()
+        contexts = Contexts(store)
+        async with contexts.mutate("s") as mutation:
+            mutation.focus_task("claim")
+        restored = await contexts.snapshot("s")
+        assert restored.slots_by_topic == claim.slots_by_topic
+        assert restored.pending_confirmation == claim.pending_confirmation
+        assert restored.facts == claim.facts and restored.low_confidence_streak == 1
+        assert [item["text"] for item in router_view(restored)["recent_turns"]] == ["Claim question"]
+        async with contexts.mutate("s") as mutation:
+            mutation.focus_task("claim")
+        assert (await contexts.snapshot("s")).context_version == restored.context_version
+        reset = await contexts.start_call("s")
+        assert reset.task_states == {} and reset.domain_task_id == "default"
+
+    asyncio.run(run())
