@@ -3,7 +3,8 @@
 import asyncio
 import json
 import math
-from collections import defaultdict
+import time
+from collections import OrderedDict, defaultdict
 from typing import Any
 
 from openai import APIError, AsyncOpenAI
@@ -115,6 +116,60 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
     return vectors
 
 
+# Process-local caches (hackathon perf, ADR none). The knowledge base is read-only at runtime,
+# so cached query embeddings and rag_query results are safe as long as they are dropped whenever
+# the kit is (re)loaded — see load_kit(), the only place kit_records changes.
+_EMBED_CACHE_SIZE = 256
+_embed_cache: OrderedDict[tuple[str, str, int], list[float]] = OrderedDict()
+_query_cache: dict[tuple[str, str | None, tuple[str, ...], int], tuple[float, dict]] = {}
+
+
+def clear_knowledge_cache() -> None:
+    """Drop the query-embedding LRU and the rag_query TTL cache. Call after the kit changes."""
+    _embed_cache.clear()
+    _query_cache.clear()
+
+
+async def _embed_query_cached(texts: list[str]) -> list[list[float]]:
+    """LRU (~256) over embed_texts for query text, keyed by (text, model, dimensions)."""
+    keys = [(t, settings.embedding_model, settings.embedding_dimensions) for t in texts]
+    results: list[list[float] | None] = []
+    for key in keys:
+        vector = _embed_cache.get(key)
+        if vector is not None:
+            _embed_cache.move_to_end(key)
+        results.append(vector)
+    missing = [i for i, vector in enumerate(results) if vector is None]
+    if missing:
+        fetched = await embed_texts([texts[i] for i in missing])
+        for i, vector in zip(missing, fetched, strict=True):
+            _embed_cache[keys[i]] = vector
+            _embed_cache.move_to_end(keys[i])
+            results[i] = vector
+        while len(_embed_cache) > _EMBED_CACHE_SIZE:
+            _embed_cache.popitem(last=False)
+    return results  # type: ignore[return-value]
+
+
+def _query_cache_get(key: tuple[str, str | None, tuple[str, ...], int]) -> dict | None:
+    if settings.knowledge_cache_ttl <= 0:
+        return None
+    entry = _query_cache.get(key)
+    if entry is None:
+        return None
+    expires_at, result = entry
+    if expires_at < time.monotonic():
+        _query_cache.pop(key, None)
+        return None
+    return result
+
+
+def _query_cache_put(key: tuple[str, str | None, tuple[str, ...], int], result: dict) -> None:
+    if settings.knowledge_cache_ttl <= 0:
+        return
+    _query_cache[key] = (time.monotonic() + settings.knowledge_cache_ttl, result)
+
+
 def fuse_ranks(
     lexical: list[dict],
     semantic: list[dict],
@@ -190,6 +245,10 @@ class RagIndex:
             raise ValueError("Invalid semantic search query")
         if not q or len(q) > MAX_QUERY_CHARS or not 1 <= limit <= 20:
             raise ValueError("RAG query requires 1..4000 characters and limit 1..20")
+        cache_key = (q, search_query, tuple(kinds), limit)
+        cached = _query_cache_get(cache_key)
+        if cached is not None:
+            return cached
         params = _parameters(kinds)
         # Snapshot lexical results and index status, then release the connection before HTTP.
         async with self.sessions() as session:
@@ -216,7 +275,7 @@ class RagIndex:
             elapsed = asyncio.get_running_loop().time() - started
             budget = max(0, settings.llm_timeout_seconds * 0.75 - elapsed)
             async with asyncio.timeout(budget):
-                vectors = await embed_texts([q, search_query] if search_query else [q])
+                vectors = await _embed_query_cached([q, search_query] if search_query else [q])
         except (APIError, ValueError, TimeoutError):
             return {**fallback, "degraded_reason": "embedding_request_failed"}
         try:
@@ -258,7 +317,9 @@ class RagIndex:
                     limit,
                     lexical_weight=LEXICAL_RRF_WEIGHT,
                 )
-            return {"hits": [sourced(hit) for hit in hits], "search_mode": "hybrid"}
+            result = {"hits": [sourced(hit) for hit in hits], "search_mode": "hybrid"}
+            _query_cache_put(cache_key, result)
+            return result
         except SQLAlchemyError:
             return {**fallback, "degraded_reason": "index_unavailable"}
 

@@ -162,8 +162,10 @@ async def load_kit(session: AsyncSession, datasets_dir: Path, *, reset: bool = F
     )
     await session.execute(stmt)
     await session.commit()
-    from app.knowledge.rag import schedule_reindex
+    from app.knowledge.rag import clear_knowledge_cache, schedule_reindex
 
+    # Kit rows changed: query embeddings and rag_query results cached from before are stale.
+    clear_knowledge_cache()
     schedule_reindex(session.bind)
     return len(rows)
 
