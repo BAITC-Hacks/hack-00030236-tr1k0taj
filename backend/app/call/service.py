@@ -38,7 +38,7 @@ from app.call.ports import (
     Transcript,
     TurnInput,
 )
-from app.context import Contexts, router_view
+from app.context import Contexts, SessionContext, SessionNotFound, router_view
 from app.knowledge import open_knowledge
 from app.router import Decision, RouterOutput, RouterResult, UnknownScenario, decide
 
@@ -63,6 +63,15 @@ class CallService:
         self.providers = providers
         self._locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self.last_router: dict[str, RouterResult] = {}
+        self._opening = asyncio.Lock()
+
+    async def ensure_call(self, session_id: str) -> tuple[SessionContext, bool]:
+        """Сессия по UUID с фронта: вернуть существующую или открыть новый звонок."""
+        async with self._opening:  # два первых запроса с одним UUID не откроют звонок дважды
+            try:
+                return await self.contexts.snapshot(session_id), False
+            except SessionNotFound:
+                return await self.contexts.start_call(session_id), True
 
     def busy(self, session_id: str) -> bool:
         return self._locks[session_id].locked()

@@ -1,6 +1,7 @@
 """Ход звонка через HTTP: SSE-события, моки без ключей, один foreground-ход."""
 
 import json
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
@@ -91,7 +92,26 @@ def test_busy_session_and_missing_session():
             assert r.status_code == 409
         finally:
             lock.release()
-        assert client.post("/calls/nope/turns/text", json={"text": "x"}).status_code == 404
+        assert client.post("/calls/nope/turns/text", json={"text": "x"}).status_code == 422
+        assert client.get(f"/calls/{uuid4()}/router/last").status_code == 404
+
+
+def test_session_uuid_comes_from_frontend():
+    with TestClient(app) as client:
+        sid = str(uuid4())
+        first = client.post("/calls", json={"session_id": sid})
+        assert first.status_code == 201 and first.json()["session_id"] == sid
+        client.post(f"/calls/{sid}/turns/text", json={"text": "привет"})
+
+        again = client.post("/calls", json={"session_id": sid})
+        assert again.status_code == 200 and again.json()["created"] is False
+        assert again.json()["context"]["turn_id"] == 1  # поток общения не сброшен
+
+        # первый ход по новому UUID открывает звонок сам, без POST /calls
+        fresh = str(uuid4())
+        evs = events(client.post(f"/calls/{fresh}/turns/text", json={"text": "x"}).text)
+        assert evs[1]["type"] == "turn.started" and evs[1]["session_id"] == fresh
+        assert client.get(f"/sessions/{fresh}/context").json()["turn_id"] == 1
 
 
 def test_cancelled_turn_emits_nothing_after_stop():
