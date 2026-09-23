@@ -110,6 +110,9 @@ backend). `cancel`, `playback`, `router/last` по незнакомому UUID �
 Модуль `call` оркестрирует ход и зависит от портов, а не от провайдеров:
 `SpeechToText`, `ScenarioRouter`, `Executor`, `Responder`, `TextToSpeech`, `Background`.
 Реализации выбираются через env (`STT_PROVIDER`, `LLM_PROVIDER`, `TTS_PROVIDER`, по умолчанию `mock`).
+Где живут порты: `SpeechToText`/`TextToSpeech` и моки речи — модуль `speech`
+(docs/specs/speech-module.md); `Executor`/`Responder`/`Background` и базовые реализации — модуль `executor`
+(docs/specs/executor-module.md); `ScenarioRouter` и `Providers` — `call.ports`. `app.call` реэкспортирует прежние имена.
 
 Моки ведут себя честно (ADR 0008): mock-STT отдаёт `error stt_unavailable` и просит текстовый ввод;
 mock-роутер отдаёт `error llm_unavailable` без выдуманного сценария; mock-TTS аудио не отдаёт.

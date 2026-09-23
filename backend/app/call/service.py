@@ -6,7 +6,6 @@
 
 import asyncio
 import base64
-import re
 import time
 from collections import defaultdict
 from collections.abc import AsyncIterator
@@ -30,20 +29,12 @@ from app.call.events import (
     TurnDoneEvent,
     TurnStartedEvent,
 )
-from app.call.mocks import reply_language
-from app.call.ports import (
-    Execution,
-    Providers,
-    ProviderUnavailable,
-    ReplyBrief,
-    Transcript,
-    TurnInput,
-)
+from app.call.ports import Providers
 from app.context import Contexts, SessionContext, SessionNotFound, router_view
+from app.executor import Execution, ReplyBrief, TurnInput, reply_language
 from app.knowledge import open_knowledge
 from app.router import Decision, RouterOutput, RouterResult, UnknownScenario, decide
-
-_SENTENCE_END = re.compile(r"(?<=[.!?…])\s+")
+from app.speech import ProviderUnavailable, Transcript, split_sentences
 
 
 def _ms(start: float, end: float | None = None) -> int:
@@ -348,7 +339,7 @@ class _Turn:
                     first = False
                 full += delta
                 buf += delta
-                *done, buf = _SENTENCE_END.split(buf)
+                *done, buf = split_sentences(buf)
                 for s in done:
                     await sentences.put((s, None, None))
                 await out.put(ReplyDeltaEvent(turn_id=self.turn_id, text=delta))

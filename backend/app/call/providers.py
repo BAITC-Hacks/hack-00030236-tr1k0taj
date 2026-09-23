@@ -1,20 +1,15 @@
-"""Выбор реализаций портов через env (ADR 0008). Сейчас есть только моки; боевые адаптеры
-регистрируются здесь по имени провайдера."""
+"""Выбор реализаций портов через env (ADR 0008). Адаптеры речи регистрируются в app.speech,
+роутер — здесь по имени провайдера."""
 
-from app.call.mocks import (
-    BaselineExecutor,
-    MockRouter,
-    MockSpeechToText,
-    MockTextToSpeech,
-    NoopBackground,
-    TemplateResponder,
-)
+from app.call.mocks import MockRouter
 from app.call.ports import Providers
 from app.config import Settings
+from app.executor import BaselineExecutor, NoopBackground, TemplateResponder
+from app.speech import STT, TTS, build_stt, build_tts
 
-STT = {"mock": MockSpeechToText}
 LLM = {"mock": MockRouter}
-TTS = {"mock": MockTextToSpeech}
+
+__all__ = ["LLM", "STT", "TTS", "build_providers"]
 
 
 def _pick(registry: dict, name: str, env: str):
@@ -28,10 +23,10 @@ def _pick(registry: dict, name: str, env: str):
 
 def build_providers(settings: Settings) -> Providers:
     return Providers(
-        stt=_pick(STT, settings.stt_provider, "STT_PROVIDER"),
+        stt=build_stt(settings.stt_provider),
         router=_pick(LLM, settings.llm_provider, "LLM_PROVIDER"),
         executor=BaselineExecutor(),
         responder=TemplateResponder(),
-        tts=_pick(TTS, settings.tts_provider, "TTS_PROVIDER"),
+        tts=build_tts(settings.tts_provider),
         background=NoopBackground(),
     )
