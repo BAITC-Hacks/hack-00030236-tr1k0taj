@@ -374,7 +374,7 @@ class Runtime:
         result = await self._control(sid, "record", request.request_id,
                                      request.model_dump(mode="json"), mutate)
         if request.key != "$message":
-            await self.schedule(sid, "record.changed", request.task_id)
+            await self.schedule(sid, "record.changed", request.task_id, changed_keys={request.key})
         return result
 
     async def list_records(self, sid, task_id=None):
@@ -549,7 +549,7 @@ class Runtime:
                                     turn_id=response["turn_id"])]
             await self._change(sid, mark)
 
-    async def schedule(self, sid, trigger, task_id=None):
+    async def schedule(self, sid, trigger, task_id=None, changed_keys=None):
         async with self.locks[sid]:
             def apply(state, seq):
                 if state["status"] != "open":
@@ -628,7 +628,7 @@ class Runtime:
                            "input_revision": revision, "generation": state["generation"],
                            "turn_id": turn_id, "status": "blocked" if blocked_by else "queued"}
                     if retrying:
-                        run["retry_of"] = failed["run_id"]
+                        run["retry_of"] = matches[-1]["run_id"]
                     state["runs"][run["run_id"]] = run
                     if blocked_by:
                         events.append(event("agent.blocked", {

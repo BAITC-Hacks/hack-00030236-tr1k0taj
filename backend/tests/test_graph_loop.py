@@ -177,16 +177,15 @@ def test_agent_on_response_completed_runs_after_response_with_no_public_events()
                 AgentSpec(agent_id="followup", instructions="Keep reading",
                           on=["response.completed"]),
             ])))["session_id"]
-            before = await runtime.repo.events(sid)
             await runtime.submit(sid, turn())
             await completed(runtime.main_tasks[sid])
+            after_response = await runtime.repo.events(sid)
+            assert after_response[-1]["type"] == "response.completed"
             state = await drain(runtime, sid)
             runs = [r for r in state["runs"].values() if r["agent_id"] == "followup"]
             assert len(runs) == 1 and runs[0]["status"] == "completed"
-            after = await runtime.repo.events(sid)
-            assert [e["type"] for e in after[:len(before)]] == [e["type"] for e in before]
-            new_public_types = {e["type"] for e in after[len(before):]}
-            assert new_public_types == set()
+            after_background = await runtime.repo.events(sid)
+            assert after_background == after_response
 
     asyncio.run(run())
 
@@ -217,23 +216,27 @@ def test_record_change_reschedules_only_the_agent_reading_that_key():
 
 
 def test_budget_stops_a_self_feeding_graph(monkeypatch):
-    monkeypatch.setattr(settings, "kernel_max_runs_per_turn", 3)
-    monkeypatch.setattr(settings, "kernel_max_runs_per_session", 3)
+    monkeypatch.setattr(settings, "kernel_max_runs_per_turn", 4)
+    monkeypatch.setattr(settings, "kernel_max_runs_per_session", 4)
 
     async def run():
-        class SelfFeeding(Driver):
+        class PingPong(Driver):
             async def run_background(self, agent, context, tool):
-                return BackgroundResult("again")
+                return BackgroundResult(agent["agent_id"])
 
-        async with kernel(SelfFeeding()) as runtime:
+        async with kernel(PingPong()) as runtime:
+            # Two agents cross-reading each other's output retrigger one another forever;
+            # only the hard budget below can stop this self-feeding graph.
             sid = (await runtime.create(CreateSession(agents=[
-                AgentSpec(agent_id="loopy", instructions="Feed on your own output",
-                          on=["user.message", "agent.result"], reads=["agent:loopy"]),
+                AgentSpec(agent_id="ping", instructions="Ping", reads=["agent:pong"],
+                          on=["user.message", "agent.result"]),
+                AgentSpec(agent_id="pong", instructions="Pong", reads=["agent:ping"],
+                          on=["user.message", "agent.result"]),
             ])))["session_id"]
             await runtime.submit(sid, turn())
             await completed(runtime.main_tasks[sid])
             state = await drain(runtime, sid)
-            assert len(state["runs"]) == 3
+            assert len(state["runs"]) == 4
             events = await runtime.repo.events(sid, public=False)
             assert any(e["type"] == "graph.budget_exhausted" for e in events)
 
