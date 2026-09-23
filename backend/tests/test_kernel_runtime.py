@@ -111,7 +111,9 @@ def test_two_background_results_reach_next_segment_of_same_response():
             sid = (await runtime.create(CreateSession()))["session_id"]
             accepted = await runtime.submit(sid, turn())
             await completed(asyncio.create_task(driver.first_started.wait()))
-            await asyncio.gather(*(completed(t) for t in runtime.background_tasks[sid].values()))
+            # next_step зависит от knowledge (граф агентов): ждём и задачи, созданные после
+            for _ in range(3):
+                await asyncio.gather(*(completed(t) for t in list(runtime.background_tasks[sid].values())))
             driver.next_segment.set()
             await completed(runtime.main_tasks[sid])
             state = await runtime.repo.get(sid)

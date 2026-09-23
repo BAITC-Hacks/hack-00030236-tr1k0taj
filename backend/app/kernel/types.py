@@ -13,7 +13,7 @@ class Contract(BaseModel):
 class AgentSpec(Contract):
     agent_id: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_-]*$")
     instructions: str = Field(min_length=1, max_length=4000)
-    on: list[Literal["user.message", "agent.result"]] = Field(
+    on: list[Literal["user.message", "agent.result", "response.completed", "record.changed"]] = Field(
         default_factory=lambda: ["user.message"]
     )
     depends_on: list[str] = Field(default_factory=list, max_length=8)
@@ -22,6 +22,9 @@ class AgentSpec(Contract):
     )
     reads: list[str] = Field(default_factory=lambda: ["$message"], min_length=1, max_length=32)
     timeout_seconds: float = Field(default=20, ge=1, le=60)
+    mode: Literal["llm", "reader"] = "llm"
+    blocking: bool = False
+    deadline_ms: int = Field(default=800, ge=100, le=5000)
 
     @model_validator(mode="after")
     def valid_reads(self):
@@ -42,9 +45,12 @@ def default_agents() -> list[AgentSpec]:
         AgentSpec(
             agent_id="next_step",
             instructions=(
-                "Найди в базе знаний следующий практический шаг и требования к документам "
-                "по текущему вопросу. Только проверенные источники. Не выполняй действий."
+                "Дополни уже найденное агентом knowledge: следующий практический шаг и "
+                "требования к документам по текущему вопросу. Не ищи заново то, что уже "
+                "нашли. Только проверенные источники. Не выполняй действий."
             ),
+            depends_on=["knowledge"],
+            on=["agent.result"],
         ),
     ]
 

@@ -62,6 +62,10 @@ expand-kb *flags:
 eval-search:
     docker compose exec backend python -m evals.search
 
+# качество роутера на 104 dev-репликах (ADR 0007; нужен OPENAI_API_KEY, реальная модель)
+eval:
+    docker compose exec backend python -m evals.router
+
 # psql в базу
 psql:
     docker compose exec db sh -c 'psql -U $POSTGRES_USER -d $POSTGRES_DB'
@@ -94,6 +98,10 @@ smoke-live-local:
 
 index-local:
     ./infra/backend-local.sh python -m scripts.index_knowledge
+
+# качество роутера на 104 dev-репликах, без Docker (нужен OPENAI_API_KEY)
+eval-local:
+    ./infra/backend-local.sh python -m evals.router
 
 # отдельный локальный PostgreSQL 17; PG_BIN можно переопределить
 db-local:
