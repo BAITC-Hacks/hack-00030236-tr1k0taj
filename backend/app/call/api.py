@@ -314,7 +314,7 @@ async def text_turn(
     responses={409: {"description": "Realtime STT недоступен (mock-режим или нет ключа)"}},
 )
 async def stt_session(
-    session_id: Session, calls: Calls,
+    session_id: SessionId, calls: Calls,
     language_hint: Literal["ru", "kk"] | None = None,
 ) -> RealtimeSession:
     try:
