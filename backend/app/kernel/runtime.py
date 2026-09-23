@@ -164,8 +164,8 @@ class Runtime:
         fields["response_id"] = response["response_id"]
         return await self.playback(sid, PlaybackRequest.model_validate(fields))
 
-    async def _change(self, sid, apply):
-        result, events = await self.repo.change(sid, apply)
+    async def _change(self, sid, apply, *, durable=True):
+        result, events = await self.repo.change(sid, apply, durable=durable)
         if events:
             self.signals[sid].set()
         return result
@@ -386,7 +386,7 @@ class Runtime:
                     return None, [event("response.delta", {"text": text}, author="main",
                         public=True, response_id=rid, segment_id=segment_id,
                         turn_id=response["turn_id"])]
-                await self._change(sid, append)
+                await self._change(sid, append, durable=False)  # journal-only delta
         async def tool(name, args):
             return await self.tool(sid, response, "main", name, args)
         async with self.global_semaphore:

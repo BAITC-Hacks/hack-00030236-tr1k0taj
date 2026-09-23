@@ -17,6 +17,7 @@ backend/app/context/
   types.py      # SessionContext, Fact, PendingConfirmation, Turn, BoardEntry, ContextPatch, PatchResult
   mutation.py   # Mutation: транзакция над рабочей копией, решает, растёт ли версия
   service.py    # Contexts: единственный писатель, asyncio.Lock на сессию
+  runtime.py    # RuntimeOwner: протокол владельца runtime-слота + журнал (seq)
   store.py      # ContextStore: PgStore (прод) и MemoryStore (тесты)
   models.py     # таблицы sessions, board_entries (JSONB)
   views.py      # router_view(), handoff_summary() — чистые функции над снимком
@@ -28,16 +29,48 @@ backend/app/context/
 пишется в Postgres одной транзакцией: upsert `sessions` + insert `board_entries`.
 Перезапуск завершает активную генерацию; сохранённые история и журнал доступны для чтения.
 
-Agent kernel использует те же `sessions`/`board_entries`, без отдельных таблиц сессий:
-`SessionContext.kernel` хранит его runtime projection и исключён из публичной сериализации
-`/context`. `Contexts.kernel_create/get/change/events/open_sessions` — единственный путь
-его чтения и атомарных изменений; `Repository` ядра является адаптером этих методов.
-События хранятся как `BoardEntry(type="kernel", payload=envelope)`; envelope содержит
-монотонный `seq`, generation и visibility. `/board` скрывает внутренние kernel-события,
-а SSE использует отдельный отфильтрованный replay. Runtime-изменения не повышают
-доменный `context_version`; актуальность фона проверяется по generation/input_revision.
-Reset очищает projection, повышает generation и сохраняет монотонность курсора.
-История bot сама по себе не подтверждает доставку: playback определяется только ACK ядра.
+Agent kernel использует те же `sessions`/`board_entries`, без отдельных таблиц сессий.
+`/board` скрывает внутренние события журнала, SSE использует отдельный отфильтрованный replay.
+Runtime-изменения не повышают доменный `context_version`. История bot сама по себе не
+подтверждает доставку: playback определяется только ACK ядра.
+
+### Runtime-слот и журнал
+
+Context — общий blackboard: он хранит **непрозрачный** runtime-слот (`SessionContext.kernel`,
+исключён из `/context`) и append-only журнал событий (`BoardEntry(type="kernel", payload=envelope)`).
+Форма слота, поля envelope и что происходит со слотом при reset решает владелец runtime —
+`RuntimeOwner` (`app/context/runtime.py`), которого ядро регистрирует через
+`contexts.attach_runtime(owner)` (реализация: `app/kernel/journal.py`, `KernelJournal`).
+
+```python
+class RuntimeOwner(Protocol):
+    active: tuple[str, Any]                                  # slot[key]==value — живой runtime
+    def initial(ctx, spec) -> (slot, events)                 # новый слот + "created"
+    def restarts_generation(slot) -> bool                    # пересоздание требует новое поколение
+    def on_reset(before_slot, after_ctx) -> (slot, events)   # новое поколение контекста
+    def entry(ctx, event, seq) -> BoardEntry                 # строка журнала
+```
+
+Context знает только контракт журнала: ключ курсора `last_seq` в слоте (монотонен через поколения),
+`payload.seq` и `payload.visibility` (`public` видно на `/board` и в публичном replay).
+Context **не знает**: статусы, сообщения, ответы, агентов, envelope-поля (`turn_id`, `input_revision`...),
+события `session.created/closed`. Context не импортирует `app.kernel`.
+
+API: `runtime_create(sid, spec)`, `runtime_get`, `runtime_change(sid, apply, *, durable=True)`,
+`runtime_events(sid, after, public=, limit=)`, `runtime_active_sessions()`. Старые имена
+`kernel_create/get/change/events/open_sessions` — тонкие обёртки для `kernel.Repository`.
+
+`durable=False` (только `response.delta` из стриминга): слот меняется в памяти, в store
+идёт лишь insert строк журнала (`ContextStore.append`), без upsert всего JSONB-снимка.
+Снимок пишет следующая durable-запись (`segment.completed`, любой `mutate`, close).
+Было: N upsert'ов `sessions.state` на N токенов; стало: 0 (тест `test_context_journal.py`).
+Компромисс: после падения посреди сегмента текст последнего сегмента в снимке отстаёт от журнала
+(восстанавливается из `response.delta`), а курсор при загрузке берётся как
+`max(snapshot.last_seq, max(seq) журнала)` — `seq` остаётся уникальным. `Runtime.recover`
+закрывает открытые сессии durable-записью.
+
+TODO(hack): имя слота `kernel` и тип строк `"kernel"` — унаследованный формат хранения;
+переименование потребует миграции.
 
 Типы `Fact`, `BoardEntry`, `ContextPatch` принадлежат `context`. `add_facts` и `ContextPatch` принимают и `knowledge.Fact` (те же поля).
 
@@ -113,4 +146,6 @@ handoff_summary(snap)             # dict с контекстом для опер
 
 ## Ключевые тесты
 `backend/tests/test_context.py` на `MemoryStore`, без БД и LLM: версии, откат, патчи, подтверждения,
-изоляция звонков, стек тем и отмена хода.
+изоляция звонков, стек тем и отмена хода. `backend/tests/test_context_journal.py`: дельты не пишут
+снимок, журнал получает каждую дельту, финальный снимок содержит весь текст; рестарт после
+journal-only записей сохраняет монотонный `seq`.
