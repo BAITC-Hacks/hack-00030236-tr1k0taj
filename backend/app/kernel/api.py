@@ -19,7 +19,7 @@ from app.kernel.types import (
     TurnRequest,
 )
 
-router = APIRouter(tags=["agent-kernel"])
+router = APIRouter(tags=["agent-kernel"], deprecated=True)
 
 
 def runtime(request: Request) -> Runtime:

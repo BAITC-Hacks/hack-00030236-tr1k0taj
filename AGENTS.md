@@ -45,6 +45,8 @@
 | [0007](docs/adr/0007-evaluation-gate.md) | `just eval`, метрики по ru/kk/mixed |
 | [0008](docs/adr/0008-voice-and-providers.md) | Голос push-to-talk, провайдеры, режим без ключей (proposed) |
 | [0009](docs/adr/0009-modular-backend.md) | Модули с публичным API, типы у владельца, без общего `schemas/` |
+| [0012](docs/adr/0012-module-layers.md) | Слои модулей и проверка импортов |
+| [0013](docs/adr/0013-tracer-opentelemetry.md) | Tracer: трассировка OpenTelemetry |
 
 ## Роли (3 человека)
 
@@ -202,6 +204,8 @@ primary accuracy: ru __ / kk __ / mixed __
   - модуль не знает о хранилище соседа (таблицы, SQL, JSON-файлы);
   - FastAPI только в `api.py` модуля, роутеры подключает `main.py`;
   - у модуля есть спека `docs/specs/<module>-module.md` с публичным API; меняешь API — меняешь спеку.
+  - модули разложены по слоям (ADR 0012): `main` → api (`call`, `docs`) → `speech` → agent (`kernel`, `router`, `executor`) → data (`context`, `knowledge`) → infra (`tracer`, `config`, `db`); импорт только вниз;
+  - `backend/tests/test_module_boundaries.py` в `just test` проверяет слои и публичный API; новый модуль добавляй в ADR 0012 и `LAYERS` теста.
 - Фронт повторяет типами TS только HTTP-ответы модулей.
 - Данные кита kernel получает **только** через `from app.knowledge import Knowledge` (каталог, клиенты, KB, поиск; см. `docs/specs/knowledge-module.md`). JSON-файлы и таблицу `kit_records` напрямую не читаем.
 - Модели БД наследуются от `app.db.Base`. Их импорт добавляется в `backend/migrations/env.py`, после этого `just migration "..."`.
