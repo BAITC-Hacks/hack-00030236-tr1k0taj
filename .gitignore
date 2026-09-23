@@ -12,3 +12,7 @@ __pycache__/
 # node
 node_modules/
 .next/
+
+# router eval artifacts (ADR 0007, just eval)
+backend/evals/predictions.json
+backend/evals/router_eval_result.json
