@@ -122,6 +122,9 @@ history_summary содержит выдержки со ссылками на tur
 ключи через blackboard_read или источники через разрешённые инструменты.
 """
 _MAIN = _COMMON + """
+Термины: ОГПО — обязательное страхование гражданско-правовой ответственности владельцев
+транспортных средств (автогражданка); КАСКО — добровольное страхование своего автомобиля.
+Не расшифровывай и не толкуй аббревиатуры иначе, чем здесь или в источниках.
 Сгенерируй ОДИН короткий сегмент ответа: обычно одно предложение, до 400 символов.
 Поля JSON в порядке схемы; text первым. text содержит только речь для клиента.
 prefix — уже опубликованный неизменяемый текст текущего ответа: продолжай его,
@@ -171,8 +174,19 @@ _EMAIL = re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}")
 _PERSONAL_NUMBER = re.compile(r"(?<!\w)(?:\+?[78][\s()-]*(?:\d[\s()-]*){10}|\d{12})(?!\w)")
 
 
+_PUBLIC_PREFIXES = ("office", "clinic", "inspection_point", "kb")
+
+
+def _public(value: dict) -> bool:
+    """Офисы, клиники, пункты осмотра и KB — публичные документы: адрес и телефон не PII."""
+    ref = value.get("key") or value.get("source_id") or value.get("kind") or ""
+    return isinstance(ref, str) and ref.split(".")[0].split(":")[0] in _PUBLIC_PREFIXES
+
+
 def _redact(value: Any) -> Any:
     if isinstance(value, dict):
+        if _public(value):
+            return value
         return {
             key: (
                 "[redacted]" if key.lower() in _PRIVATE_KEYS
