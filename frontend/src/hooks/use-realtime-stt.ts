@@ -14,7 +14,8 @@ export function useRealtimeStt(fetchSession: FetchSession) {
   const state = useRef<{
     pc?: RTCPeerConnection; dc?: RTCDataChannel; stream?: MediaStream;
     text: string; resolve?: (r: RealtimeSttResult) => void; active: boolean;
-  }>({ text: "", active: false });
+    parts: Map<string, string>; done: Set<string>;
+  }>({ text: "", active: false, parts: new Map(), done: new Set() });
 
   const cleanup = useCallback(() => {
     const s = state.current;
@@ -26,7 +27,7 @@ export function useRealtimeStt(fetchSession: FetchSession) {
 
   const start = useCallback(async (languageHint?: "ru" | "kk") => {
     cleanup();
-    state.current.text = ""; setPartial("");
+    state.current.text = ""; state.current.parts = new Map(); state.current.done = new Set(); setPartial("");
     try {
       const [secret, stream] = await Promise.all([
         fetchSession(languageHint, AbortSignal.timeout(5000)),
@@ -38,11 +39,18 @@ export function useRealtimeStt(fetchSession: FetchSession) {
       dc.onmessage = event => {
         try {
           const msg = JSON.parse(event.data);
+          // Текст собираем по item_id в порядке появления: фраза может прийти несколькими элементами.
+          const id = typeof msg.item_id === "string" ? msg.item_id : "_";
+          const parts = state.current.parts;
           if (msg.type === "conversation.item.input_audio_transcription.delta" && typeof msg.delta === "string") {
-            state.current.text += msg.delta; setPartial(state.current.text);
+            parts.set(id, (parts.get(id) ?? "") + msg.delta);
           } else if (msg.type === "conversation.item.input_audio_transcription.completed" && typeof msg.transcript === "string") {
-            state.current.text = msg.transcript; setPartial(state.current.text);
-            state.current.resolve?.(state.current.text.trim() ? { text: state.current.text.trim(), language: languageHint } : null);
+            parts.set(id, msg.transcript); state.current.done.add(id);
+          } else return;
+          state.current.text = [...parts.values()].join(" ").replace(/\s+/g, " ").trim();
+          setPartial(state.current.text);
+          if (state.current.resolve && [...parts.keys()].every(key => state.current.done.has(key))) {
+            state.current.resolve(state.current.text ? { text: state.current.text } : null);
             state.current.resolve = undefined;
           }
         } catch { /* malformed realtime event, ignore */ }

@@ -67,6 +67,13 @@ class OpenAISpeechToText:
         return Transcript(text=text, language=detect_language(text, language_hint))
 
 
+_STT_PROMPT = (
+    "Звонок в страховую компанию Saqta Insurance. Русский и казахский, возможно вперемешку. "
+    "Термины: полис, ОГПО, КАСКО, страховой случай, выплата, заявление, франшиза, ДТП, "
+    "продление, сақтандыру, полис, төлем, өтініш."
+)
+
+
 async def create_realtime_session(language_hint: str | None) -> RealtimeSession:
     """Эфемерный client_secret для WebRTC realtime-транскрипции (voice-router-spec.md, ADR 0008).
 
@@ -74,9 +81,8 @@ async def create_realtime_session(language_hint: str | None) -> RealtimeSession:
     upload). Ход остаётся: финальный текст возвращается через POST /turns/text (source=stt).
     """
     client = _client("stt")
-    transcription: dict = {"model": settings.stt_model}
-    if language_hint in ("ru", "kk"):
-        transcription["language"] = language_hint
+    # Язык не фиксируем: клиент может смешивать ru/kk внутри фразы. Подсказка — словарь домена.
+    transcription: dict = {"model": settings.realtime_stt_model, "prompt": _STT_PROMPT}
     secret = await client.realtime.client_secrets.create(
         session={
             "type": "transcription",
@@ -85,12 +91,13 @@ async def create_realtime_session(language_hint: str | None) -> RealtimeSession:
                     "format": {"type": "audio/pcm", "rate": 24000},
                     "noise_reduction": {"type": "near_field"},
                     "transcription": transcription,
-                    "turn_detection": {"type": "server_vad"},
+                    # Без VAD: push-to-talk, фраза фиксируется целиком по commit при отпускании
+                    "turn_detection": None,
                 }
             },
         }
     )
-    return RealtimeSession(client_secret=secret.value, expires_at=secret.expires_at, model=settings.stt_model)
+    return RealtimeSession(client_secret=secret.value, expires_at=secret.expires_at, model=settings.realtime_stt_model)
 
 
 class OpenAITextToSpeech:
