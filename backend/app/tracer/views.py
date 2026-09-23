@@ -219,7 +219,8 @@ def _usage(records: list[Record]) -> tuple[dict[str, ModelUsage], int]:
         if r["span_id"] in shadowed:
             continue
         a = r["attributes"]
-        model = str(a.get("gen_ai.response.model") or a.get("gen_ai.request.model") or "unknown")
+        model = str(a.get("gen_ai.response.model") or a.get("gen_ai.request.model")
+                    or a.get("gen_ai.provider.name") or "unknown")
         m = models.setdefault(model, ModelUsage())
         m.input += _int(a.get("gen_ai.usage.input_tokens"))
         m.output += _int(a.get("gen_ai.usage.output_tokens"))

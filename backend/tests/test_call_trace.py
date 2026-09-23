@@ -77,3 +77,15 @@ def test_text_turn_trace_nests_stages_under_server_span():
         (turn_view,) = [t for t in call["turns"] if t["trace_id"] == trace_id]
         assert turn_view["router"]["scenario_id"] == "SC17"
         assert {"router", "executor", "responder"} <= set(turn_view["stages"])
+
+
+def test_mock_router_usage_is_attributed_to_mock_and_tts_sentences_are_numbered():
+    sid = str(uuid4())
+    with TestClient(app) as client:
+        r = client.post(f"/calls/{sid}/turns/text", json={"text": "статус выплаты"})
+        trace_id = r.headers["x-trace-id"]
+        spans = list(_flatten(client.get(f"/traces/{trace_id}").json()["spans"]))
+        seqs = [s["attributes"]["tts.seq"] for s in spans if s["name"] == "tts.sentence"]
+        assert seqs == list(range(len(seqs))) and len(seqs) > 1  # мок-TTS аудио не отдаёт
+        usage = client.get(f"/traces/sessions/{sid}").json()["summary"]["tokens_by_model"]
+        assert "unknown" not in usage and usage["mock"]["calls"] == 1
