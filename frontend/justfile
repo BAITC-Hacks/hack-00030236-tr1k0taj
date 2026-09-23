@@ -12,3 +12,6 @@ lint:
 
 build:
     npm run build
+
+test:
+    node --experimental-strip-types --test tests/stream.test.mjs

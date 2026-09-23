@@ -1,12 +1,13 @@
 "use client";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Icon } from "./icon";
 
-export function Modal({ title, children, onClose, wide = false }: { title: string; children: ReactNode; onClose: () => void; wide?: boolean }) {
+export function Modal({ title, children, onClose, wide = false, drawer = false }: { title: string; children: ReactNode; onClose: () => void; wide?: boolean; drawer?: boolean }) {
   const dialog = useRef<HTMLDialogElement>(null);
+  const titleId = useId();
   useEffect(() => { const element = dialog.current; element?.showModal(); return () => element?.close(); }, []);
-  return <dialog ref={dialog} className={`modal ${wide ? "modal-wide" : ""}`} onCancel={e => { e.preventDefault(); onClose(); }} onClick={e => { if (e.target === e.currentTarget) onClose(); }} aria-labelledby="dialog-title">
-    <div className="modal-content"><header><h2 id="dialog-title">{title}</h2><button className="icon-button" aria-label="Close / Закрыть" onClick={onClose}><Icon name="close" /></button></header><div className="modal-body">{children}</div></div>
+  return <dialog ref={dialog} className={`modal ${wide ? "modal-wide" : ""} ${drawer ? "modal-drawer" : ""}`} onCancel={e => { e.preventDefault(); onClose(); }} onClick={e => { if (e.target === e.currentTarget) onClose(); }} aria-labelledby={titleId}>
+    <div className="modal-content"><header><h2 id={titleId}>{title}</h2><button className="icon-button" aria-label="Close / Закрыть" onClick={onClose}><Icon name="close" /></button></header><div className="modal-body">{children}</div></div>
   </dialog>;
 }
 export function Dropdown({ label, children, icon = "down" }: { label: string; children: ReactNode; icon?: string }) {

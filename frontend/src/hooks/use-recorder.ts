@@ -9,6 +9,7 @@ export function useRecorder() {
   const [url, setUrl] = useState<string | null>(null);
   const [seconds, setSeconds] = useState(0);
   const [level, setLevel] = useState(0);
+  const [endedAt, setEndedAt] = useState<number | null>(null);
   const state = useRef<{ epoch: number; busy: boolean; stream?: MediaStream; recorder?: MediaRecorder; context?: AudioContext; timer?: ReturnType<typeof setInterval>; url?: string }>({ epoch: 0, busy: false });
   const release = useCallback(() => {
     const s = state.current;
@@ -27,7 +28,7 @@ export function useRecorder() {
     release();
     if (s.url) URL.revokeObjectURL(s.url);
     s.url = undefined;
-    setBlob(null); setUrl(null); setPhase("idle"); setSeconds(0); setLevel(0); setError(null);
+    setBlob(null); setUrl(null); setPhase("idle"); setSeconds(0); setLevel(0); setError(null); setEndedAt(null);
   }, [release]);
   useEffect(() => () => {
     const s = state.current; s.epoch++;
@@ -36,7 +37,7 @@ export function useRecorder() {
   }, [release]);
   const stop = useCallback(() => {
     const r = state.current.recorder;
-    if (r?.state === "recording") r.stop();
+    if (r?.state === "recording") { setEndedAt(performance.now()); r.stop(); }
   }, []);
   const start = useCallback(async () => {
     if (state.current.busy) return;
@@ -49,7 +50,8 @@ export function useRecorder() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       if (s.epoch !== epoch) { stream.getTracks().forEach(t => t.stop()); return; }
       s.stream = stream;
-      const mimeType = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"].find(x => MediaRecorder.isTypeSupported(x));
+      const mimeType = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"].find(x => MediaRecorder.isTypeSupported(x));
+      if (!mimeType) { release(); s.busy = false; setPhase("idle"); setError("audioFormat"); return; }
       const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
       s.recorder = recorder;
       const chunks: BlobPart[] = [];
@@ -84,5 +86,5 @@ export function useRecorder() {
       setError(name === "NotAllowedError" ? "denied" : name === "NotFoundError" ? "noDevice" : "micError");
     }
   }, [discard, release, stop]);
-  return { phase, error, blob, url, seconds, level, start, stop, discard };
+  return { phase, error, blob, url, seconds, level, endedAt, start, stop, discard };
 }
