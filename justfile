@@ -50,6 +50,10 @@ migrate:
 migration message:
     docker compose exec backend alembic revision --autogenerate -m "{{message}}"
 
+# перезагрузить стартовый кит из datasets/ в БД (сбрасывает правки через CRUD)
+load-data:
+    docker compose exec backend python -m app.knowledge --reset
+
 # psql в базу
 psql:
     docker compose exec db sh -c 'psql -U $POSTGRES_USER -d $POSTGRES_DB'
