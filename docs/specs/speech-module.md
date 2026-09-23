@@ -25,8 +25,11 @@
 - [ ] `speech` не импортирует `kernel`, `router`, `executor`, `context`, `knowledge`, `call`
 - [ ] без ключей mock-STT отдаёт понятную ошибку, mock-TTS не роняет ход
 
+- адаптеры `openai` (`STT_PROVIDER`/`TTS_PROVIDER=openai`, модели `STT_MODEL`/`TTS_MODEL`/`TTS_VOICE`): STT `gpt-4o-mini-transcribe`, TTS `gpt-4o-mini-tts` → `audio/mpeg`. Без ключа — `stt_unavailable`/`tts_unavailable`, пустая речь — `stt_empty`.
+  Голос клиента при этом уходит во внешний API OpenAI: это opt-in через env, по умолчанию mock.
+
 ## Вне скоупа
-Боевые адаптеры (отдельные PR), streaming ASR.
+Streaming ASR.
 
 ## Ключевые тесты
 Покрываются `tests/test_call_api.py` (mock-режим).

@@ -30,6 +30,9 @@ services:
       STT_PROVIDER: ${STT_PROVIDER:-mock}
       LLM_PROVIDER: ${LLM_PROVIDER:-mock}
       TTS_PROVIDER: ${TTS_PROVIDER:-mock}
+      STT_MODEL: ${STT_MODEL:-gpt-4o-mini-transcribe}
+      TTS_MODEL: ${TTS_MODEL:-gpt-4o-mini-tts}
+      TTS_VOICE: ${TTS_VOICE:-alloy}
       # трассировка (ADR 0013): пусто — span'ы только в памяти процесса для GET /traces
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-voice-router-backend}
