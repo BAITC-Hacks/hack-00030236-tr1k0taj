@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     llm_provider: str = "mock"
     tts_provider: str = "mock"
     stt_model: str = "gpt-4o-mini-transcribe"
+    realtime_stt_model: str = "gpt-4o-transcribe"
     tts_model: str = "gpt-4o-mini-tts"
     tts_voice: str = "alloy"
     tts_filler: bool = True
