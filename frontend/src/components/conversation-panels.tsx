@@ -1,7 +1,7 @@
 "use client";
 import { useState } from "react";
 import type { Conversation, Fact, Turn } from "@/lib/types";
-import { scenarioTitle } from "@/lib/catalog";
+import { useCatalog } from "./catalog-provider";
 import { useVoice } from "./voice-provider";
 import { Icon } from "./icon";
 import { EmptyState, Modal } from "./ui";
@@ -20,13 +20,14 @@ export function ContextPanel({ session }: { session: Conversation | null }) {
   </div>;
 }
 export function TracePanel({ session, turn, onSelect }: { session: Conversation | null; turn?: Turn; onSelect?: (id: number) => void }) {
+  const { scenarioTitle } = useCatalog();
   const { t, locale, copy } = useVoice(); const [raw, setRaw] = useState(false); const [rawTab, setRawTab] = useState<"response" | "prompt">("response");
   if (!turn) return <EmptyState icon="layers" title={t("noTrace")} description={t("noTraceText")} />;
   return <div className="trace-body"><div className="trace-picker"><label>{t("turn")}<select value={turn.id} onChange={e => onSelect?.(Number(e.target.value))}>{session?.turns.map(item => <option key={item.id} value={item.id}>{item.id} · {item.text.slice(0, 35)}</option>)}</select></label><span className="badge">{turn.language.toUpperCase()}</span></div>
     {session?.mode === "example" && <p className="sample-note">{t("reviewOnly")}</p>}
     {!!turn.errors?.length && <details className="disclosure"><summary>{t("error")}</summary>{turn.errors.map((error, index) => <p key={index}>{error.stage} · {error.code}<br />{error.message}</p>)}</details>}<div className="trace-utterance">“{turn.text}”</div><h4 className="section-label">{t("route")}</h4>
-    {!turn.scenarios.length && <p className="muted">{t("noRoute")}</p>}{turn.scenarios.map(route => <article className="route-card" key={route.scenario_id}><div><span className="scenario-id">{route.scenario_id}</span><Icon name="check" size={17} /></div><h3>{scenarioTitle(route.scenario_id, locale)}</h3>{route.reason && <p>{route.reason}</p>}{route.confidence !== undefined && <p className="confidence">{route.confidence.toLocaleString(locale, { maximumFractionDigits: 2 })} · {t("confidence")}</p>}</article>)}
-    <details className="disclosure"><summary>{t("alternatives")}<span>{turn.alternatives.length}</span></summary>{turn.alternatives.length ? turn.alternatives.map(a => <p key={a.scenario_id}><span className="mono">{a.scenario_id}</span> {scenarioTitle(a.scenario_id, locale)} {a.confidence}</p>) : <p className="muted">{t("noAlternatives")}</p>}</details>
+    {!turn.scenarios.length && <p className="muted">{t("noRoute")}</p>}{turn.scenarios.map(route => <article className="route-card" key={route.scenario_id}><div><span className="scenario-id">{route.scenario_id}</span><Icon name="check" size={17} /></div><h3>{scenarioTitle(route.scenario_id)}</h3>{route.reason && <p>{route.reason}</p>}{route.confidence !== undefined && <p className="confidence">{route.confidence.toLocaleString(locale, { maximumFractionDigits: 2 })} · {t("confidence")}</p>}</article>)}
+    <details className="disclosure"><summary>{t("alternatives")}<span>{turn.alternatives.length}</span></summary>{turn.alternatives.length ? turn.alternatives.map(a => <p key={a.scenario_id}><span className="mono">{a.scenario_id}</span> {scenarioTitle(a.scenario_id)} {a.confidence}</p>) : <p className="muted">{t("noAlternatives")}</p>}</details>
     <details className="disclosure"><summary>{t("params")}<span>{Object.keys(turn.slots).length}</span></summary><pre>{JSON.stringify(turn.slots, null, 2)}</pre></details>
     {turn.facts.length > 0 && <section><h4 className="section-label">{t("facts")}</h4><FactList facts={turn.facts} /></section>}
     {!!turn.actions?.length && <details className="disclosure"><summary>{t("actions")}<span>{turn.actions.length}</span></summary>{turn.actions.map((action, index) => <div key={index}><p>{action.name} · {action.mode} · {action.ok ? "OK" : t("error")}</p><pre>{JSON.stringify(action.params, null, 2)}</pre></div>)}</details>}<details className="disclosure" open><summary>{t("timings")}<Icon name="clock" size={15} /></summary>{Object.keys(turn.timings).length ? <dl className="data-list">{Object.entries(turn.timings).map(([stage, value]) => <div key={stage}><dt>{stage === "total" ? "Backend total" : stage}</dt><dd>{value} ms</dd></div>)}</dl> : <p className="muted">{t("noTimings")}</p>}</details>

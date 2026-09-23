@@ -4,10 +4,11 @@ import { useVoice } from "./voice-provider";
 import { Icon } from "./icon";
 import { ContextPanel, TracePanel } from "./conversation-panels";
 import { Dropdown, Modal } from "./ui";
-import { scenarioTitle } from "@/lib/catalog";
+import { useCatalog } from "./catalog-provider";
 
 export function CallWorkspace() {
   const v = useVoice(); const { t, recorder } = v;
+  const { scenarioTitle } = useCatalog();
   const [tab, setTab] = useState<"context" | "trace">("context");
   const [mobileTab, setMobileTab] = useState<"conversation" | "context" | "trace">("conversation");
   const [replace, setReplace] = useState<(() => void) | null>(null);
@@ -19,7 +20,7 @@ export function CallWorkspace() {
   const errorText = (code: string, stage: string) => t(code === "llm_unavailable" ? "modelOffline" : stage === "stt" ? "speechOffline" : stage === "tts" ? "audioOffline" : "turnError");
   const examples = [{ icon: "document", title: "claimExample", question: "claimQuestion" }, { icon: "shield", title: "policyExample", question: "policyQuestion" }, { icon: "globe", title: "officeExample", question: "officeQuestion" }] as const;
   return <>
-    <div className="page-heading"><div><div className="eyebrow">VOICE ROUTER</div><h1>{t("workspace")}</h1><p>{t("subtitle")}</p></div><div className="heading-actions"><Dropdown label={t("example")}><button role="menuitem" onClick={() => requestReplace(() => v.loadExample("claim"))}><Icon name="document" />{t("claimExample")}</button><button role="menuitem" onClick={() => requestReplace(() => v.loadExample("payment"))}><Icon name="shield" />{scenarioTitle("SC30", v.locale)}</button></Dropdown><button className="button primary" onClick={() => requestReplace(v.reset)}><Icon name="plus" size={17} />{t("newCall")}</button></div></div>
+    <div className="page-heading"><div><div className="eyebrow">VOICE ROUTER</div><h1>{t("workspace")}</h1><p>{t("subtitle")}</p></div><div className="heading-actions"><Dropdown label={t("example")}><button role="menuitem" onClick={() => requestReplace(() => v.loadExample("claim"))}><Icon name="document" />{t("claimExample")}</button><button role="menuitem" onClick={() => requestReplace(() => v.loadExample("payment"))}><Icon name="shield" />{scenarioTitle("SC30")}</button></Dropdown><button className="button primary" onClick={() => requestReplace(v.reset)}><Icon name="plus" size={17} />{t("newCall")}</button></div></div>
     <div className="process-strip">{(["step1", "step2", "step3", "step4"] as const).map((key, i) => <div key={key}><span className="process-number">0{i + 1}</span><span>{t(key)}</span>{i < 3 && <Icon name="chevron" size={13} />}</div>)}<span className="process-end"><Icon name="shield" size={15} />Saqta Insurance</span></div>
     <div className="mobile-tabs segmented"><button aria-pressed={mobileTab === "conversation"} onClick={() => setMobileTab("conversation")}>{t("call")}</button><button aria-pressed={mobileTab === "context"} onClick={() => { setMobileTab("context"); setTab("context"); }}>{t("context")}</button><button aria-pressed={mobileTab === "trace"} onClick={() => { setMobileTab("trace"); setTab("trace"); }}>{t("trace")}</button></div>
     <div className={`workspace-grid mobile-view-${mobileTab}`}><section className="conversation-card"><header className="conversation-header"><div><span className="live-dot" /><strong>{v.session?.mode === "example" ? t("examples") : t("call")}</strong>{v.session?.mode === "example" && <span className="badge">DEMO</span>}</div><span className={`connection-status ${v.health === "error" ? "connection-error" : ""}`}><span className="tiny-dot" />{t(v.health === "ok" ? "apiOk" : v.health === "error" ? "apiError" : "checking")}</span></header>

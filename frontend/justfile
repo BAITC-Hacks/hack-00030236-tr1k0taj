@@ -14,4 +14,4 @@ build:
     npm run build
 
 test:
-    node --experimental-strip-types --test tests/stream.test.mjs
+    node --experimental-strip-types --test tests/stream.test.mjs tests/catalog.test.mjs
