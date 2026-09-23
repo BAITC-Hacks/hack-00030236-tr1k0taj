@@ -121,7 +121,8 @@ class Runtime:
         self.signals[sid].set()
 
     async def stream_turn(self, sid, turn_id, transcript, brief, *, request_id=None,
-                          task_id="default", updates=None, interrupt_previous=False):
+                          task_id="default", updates=None, interrupt_previous=False,
+                          voice=True):
         """Use the existing call UUID/turn; stream only this response's public events."""
         request = CreateSession()
         state = await self.repo.create(
@@ -134,7 +135,7 @@ class Runtime:
             sid, TurnRequest(request_id=request_id or uuid4(), text=transcript,
                              task_id=task_id, updates=updates or [],
                              interrupt_previous=interrupt_previous),
-            turn_id=turn_id, brief=brief,
+            turn_id=turn_id, brief=brief, voice=voice,
         )
         rid = accepted["response_id"]
         try:
@@ -438,7 +439,7 @@ class Runtime:
             return {"task_id": task_id, "record_ids": record_ids}, pending
         return await self._control(sid, "inputs", request_id, payload, mutate)
 
-    async def submit(self, sid, request, *, turn_id=None, brief=None):
+    async def submit(self, sid, request, *, turn_id=None, brief=None, voice=False):
         payload = request.model_dump(mode="json")
         payload["updates"] = canonical_updates(request.updates, request.task_id)
         req_id, digest = str(request.request_id), request_key("turn", payload)
@@ -506,14 +507,15 @@ class Runtime:
             self._cancel_task(self.main_tasks.get(sid))
             self._cancel_invalid_work(sid, await self.repo.get(sid))
             self.trace_links[sid] = current_span_context()
-            self.main_tasks[sid] = asyncio.create_task(self._launch(sid, result["response_id"]))
+            self.main_tasks[sid] = asyncio.create_task(
+                self._launch(sid, result["response_id"], voice=voice))
         return result
 
-    async def _launch(self, sid, rid):
+    async def _launch(self, sid, rid, *, voice=False):
         state = await self.repo.get(sid)
         response = self._active(state, rid)
         await self.schedule(sid, "user.message", response.get("task_id", "default"))
-        await self.respond(sid, rid)
+        await self.respond(sid, rid, voice=voice)
 
     async def schedule(self, sid, trigger, task_id=None):
         async with self.locks[sid]:
@@ -643,10 +645,11 @@ class Runtime:
                                     author=run["agent_id"], turn_id=run["turn_id"])]
             await self._change(sid, apply)
 
-    async def respond(self, sid, rid):
+    async def respond(self, sid, rid, *, voice=False):
         try:
+            max_segments = settings.kernel_max_segments_voice if voice else settings.kernel_max_segments
             async with asyncio.timeout(settings.kernel_response_timeout):
-                for index in range(settings.kernel_max_segments):
+                for index in range(max_segments):
                     with span("segment", {"session.id": sid, "response.id": rid,
                                           "segment.index": index}) as seg:
                         result = await self.generate_segment(sid, rid, index)

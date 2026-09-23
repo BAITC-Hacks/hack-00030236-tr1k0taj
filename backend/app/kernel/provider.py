@@ -423,7 +423,10 @@ class ModelDriver:
                     instructions=instructions,
                     input=inputs,
                     tools=[tool for tool in TOOLS if tool["name"] in allowed],
-                    # With no evidence, perform a real read before claiming insurance facts.
+                    # With no evidence at all, force a real read before claiming insurance facts.
+                    # If the executor's call_brief (or background/sources) already carries sourced
+                    # facts, skip the forced round: it costs a full extra model round-trip on most
+                    # turns for no benefit (perf: voice-router-spec 10).
                     tool_choice=("required" if allowed and not known_sources and round_index == 0
                                  and self.max_tool_rounds > 0 else
                                  "auto" if allowed and round_index < self.max_tool_rounds else "none"),
