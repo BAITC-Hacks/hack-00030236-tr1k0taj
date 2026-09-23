@@ -1,5 +1,5 @@
 import type { VoiceAdapter } from "./types";
-import type { CallEvent } from "./call-contract";
+import type { CallEvent, RealtimeSttSession } from "./call-contract";
 import { readSSE } from "./sse.ts";
 
 export class ApiError extends Error {
@@ -37,13 +37,13 @@ export const voiceAdapter: VoiceAdapter = {
   context: (id, signal) => json(`/sessions/${encodeURIComponent(id)}/context`, signal),
   board: (id, signal) => json(`/sessions/${encodeURIComponent(id)}/board`, signal),
   debug: (id, signal) => json(`/calls/${encodeURIComponent(id)}/router/last`, signal),
-  async stream(id, value, receive, signal, onTrace) {
+  async stream(id, value, receive, signal, onTrace, options) {
     const audio = typeof value !== "string";
     const form = new FormData();
     if (audio) form.set("audio", value, `utterance.${value.type.includes("ogg") ? "ogg" : value.type.includes("wav") ? "wav" : "webm"}`);
     const response = await request(`/calls/${encodeURIComponent(id)}/turns/${audio ? "audio" : "text"}`, {
       method: "POST", signal, headers: audio ? undefined : { "Content-Type": "application/json" },
-      body: audio ? form : JSON.stringify({ text: value }),
+      body: audio ? form : JSON.stringify({ text: value, ...(options?.source ? { source: options.source } : {}) }),
     });
     signal.throwIfAborted();
     const traceparent = traceHeaders(response.headers.get("traceparent") ?? undefined).traceparent;
@@ -59,6 +59,11 @@ export const voiceAdapter: VoiceAdapter = {
       receive(event);
     }, signal);
     if (!terminal) throw new Error("Incomplete response stream");
+  },
+  async sttSession(id, languageHint, signal) {
+    const qs = languageHint ? `?language_hint=${languageHint}` : "";
+    const response = await request(`/calls/${encodeURIComponent(id)}/stt/session${qs}`, { method: "POST", signal });
+    return response.json() as Promise<RealtimeSttSession>;
   },
   async cancel(id, turnId, traceparent) { await request(`/calls/${encodeURIComponent(id)}/turns/${turnId}/cancel`, { method: "POST", headers: traceHeaders(traceparent) }); },
   async playback(id, turnId, timing, traceparent) {

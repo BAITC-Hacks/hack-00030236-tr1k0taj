@@ -1,4 +1,4 @@
-import type { ActionEvent, BoardEntry, CallError, CallEvent, CallStarted, Capabilities, RouterDebug, SessionContext } from "./call-contract";
+import type { ActionEvent, BoardEntry, CallError, CallEvent, CallStarted, Capabilities, RealtimeSttSession, RouterDebug, SessionContext } from "./call-contract";
 export type Locale = "ru" | "kk";
 export type Fact = { key: string; value: string; source: string; source_id: string; origin: "required" | "background"; usedInTurn?: number };
 export type Route = { scenario_id: string; confidence?: number; reason?: string };
@@ -26,10 +26,11 @@ export interface VoiceAdapter {
   available: boolean;
   capabilities(signal: AbortSignal): Promise<Capabilities>;
   create(id: string, signal: AbortSignal): Promise<CallStarted>;
-  stream(id: string, value: string | Blob, receive: (event: CallEvent) => void, signal: AbortSignal, onTrace?: (meta: TraceMetadata) => void): Promise<void>;
+  stream(id: string, value: string | Blob, receive: (event: CallEvent) => void, signal: AbortSignal, onTrace?: (meta: TraceMetadata) => void, options?: { source?: "stt" }): Promise<void>;
   context(id: string, signal: AbortSignal): Promise<SessionContext>;
   board(id: string, signal: AbortSignal): Promise<BoardEntry[]>;
   debug(id: string, signal: AbortSignal): Promise<RouterDebug>;
+  sttSession?(id: string, languageHint: "ru" | "kk" | undefined, signal: AbortSignal): Promise<RealtimeSttSession>;
   cancel(id: string, turnId: number, traceparent?: string): Promise<void>;
   playback(id: string, turnId: number, timing: { eos_to_playback_ms: number; eos_to_reply_text_ms?: number }, traceparent?: string): Promise<void>;
 }

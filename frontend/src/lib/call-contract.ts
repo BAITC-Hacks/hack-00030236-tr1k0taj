@@ -23,6 +23,7 @@ export type BoardEntry = {
   confidence: number | null; ts_start_ms: number; ts_end_ms: number; context_version: number;
 };
 export type RouterDebug = { turn_id: number | null; result: { output: unknown; model: string; prompt: string | null; raw: string | null } | null };
+export type RealtimeSttSession = { client_secret: string; expires_at: number; model: string };
 export type CallStarted = { session_id: string; created: boolean; context: SessionContext; capabilities: Capabilities };
 export type ActionEvent = { type: "action"; name: string; mode: "read" | "preview" | "execute" | "handoff" | "unsupported"; params: Record<string, unknown>; ok: boolean; result: unknown; error: Record<string, string> | null };
 export type CallError = { type: "error"; stage: string; code: string; message: string; fatal: boolean };

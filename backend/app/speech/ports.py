@@ -17,6 +17,14 @@ class AudioChunk(BaseModel):
     data: bytes
 
 
+class RealtimeSession(BaseModel):
+    """Эфемерный секрет для realtime STT по WebRTC напрямую из браузера (ADR 0008)."""
+
+    client_secret: str
+    expires_at: int
+    model: str
+
+
 class SpeechToText(Protocol):
     name: str
 

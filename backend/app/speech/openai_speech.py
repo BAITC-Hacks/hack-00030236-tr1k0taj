@@ -9,7 +9,7 @@ from opentelemetry import trace
 
 from app.config import settings
 from app.speech.errors import ProviderUnavailable
-from app.speech.ports import AudioChunk, SpeechLanguage, Transcript
+from app.speech.ports import AudioChunk, RealtimeSession, SpeechLanguage, Transcript
 
 _KK = re.compile(r"[әғқңөұүһіӘҒҚҢӨҰҮҺІ]")
 _EXT = {"webm": "webm", "ogg": "ogg", "wav": "wav", "x-wav": "wav", "mpeg": "mp3", "mp4": "mp4"}
@@ -62,6 +62,32 @@ class OpenAISpeechToText:
         if not text:
             raise ProviderUnavailable("stt", "stt_empty", "Речь не распознана. Повторите, пожалуйста.")
         return Transcript(text=text, language=detect_language(text, language_hint))
+
+
+async def create_realtime_session(language_hint: str | None) -> RealtimeSession:
+    """Эфемерный client_secret для WebRTC realtime-транскрипции (voice-router-spec.md, ADR 0008).
+
+    Аудио клиента при этом уходит браузер → OpenAI напрямую, минуя backend (быстрее push-to-talk
+    upload). Ход остаётся: финальный текст возвращается через POST /turns/text (source=stt).
+    """
+    client = _client("stt")
+    transcription: dict = {"model": settings.stt_model}
+    if language_hint in ("ru", "kk"):
+        transcription["language"] = language_hint
+    secret = await client.realtime.client_secrets.create(
+        session={
+            "type": "transcription",
+            "audio": {
+                "input": {
+                    "format": {"type": "audio/pcm", "rate": 24000},
+                    "noise_reduction": {"type": "near_field"},
+                    "transcription": transcription,
+                    "turn_detection": {"type": "server_vad"},
+                }
+            },
+        }
+    )
+    return RealtimeSession(client_secret=secret.value, expires_at=secret.expires_at, model=settings.stt_model)
 
 
 class OpenAITextToSpeech:

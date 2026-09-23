@@ -124,15 +124,17 @@ class CallService:
 
     async def ingress(
         self, sid, *, request_id=None, text=None, audio=None, mime="audio/webm",
-        language_hint=None, task_id="default", updates=None, interrupt_previous=False,
+        language_hint=None, source="text", task_id="default", updates=None,
+        interrupt_previous=False,
     ):
         """Reserve once before the HTTP stream starts; retries subscribe to saved output."""
         rid = str(request_id or uuid4())
         updates = [item.model_dump(mode="json", exclude_unset=True)
                    if isinstance(item, BaseModel) else item
                    for item in (updates or [])]
-        payload = {"text": text, "language_hint": language_hint, "task_id": task_id,
-                   "updates": updates, "interrupt_previous": interrupt_previous}
+        payload = {"text": text, "language_hint": language_hint, "source": source,
+                   "task_id": task_id, "updates": updates,
+                   "interrupt_previous": interrupt_previous}
         if audio is not None:
             payload.update(text=None, audio_sha256=hashlib.sha256(audio).hexdigest(), mime=mime)
         digest = fingerprint(payload)
@@ -158,7 +160,8 @@ class CallService:
             self._active_requests[sid] = rid
             self._producers[(sid, rid)] = asyncio.create_task(self._produce(
                 sid, rid, text=text, audio=audio, mime=mime, language_hint=language_hint,
-                task_id=task_id, updates=updates, interrupt_previous=interrupt_previous,
+                source=source, task_id=task_id, updates=updates,
+                interrupt_previous=interrupt_previous,
             ))
         return rid, True
 
@@ -272,6 +275,7 @@ class CallService:
         audio: bytes | None = None,
         mime: str = "audio/webm",
         language_hint: str | None = None,
+        source: str = "text",
         request_id=None,
         task_id="default",
         updates=None,
@@ -286,7 +290,7 @@ class CallService:
         async with lock:
             turn = _Turn(self, session_id, audio is not None, language_hint,
                          request_id=request_id, task_id=task_id, updates=updates,
-                         interrupt_previous=interrupt_previous)
+                         interrupt_previous=interrupt_previous, text_source=source)
             try:
                 async for event in turn.run(text, audio, mime, language_hint):
                     turn.observe(event)
@@ -307,6 +311,7 @@ class _Turn:
     def __init__(
         self, svc: CallService, session_id: str, is_audio: bool = False, hint: str | None = None,
         *, request_id=None, task_id="default", updates=None, interrupt_previous=False,
+        text_source: str = "text",
     ) -> None:
         self.svc = svc
         self.p = svc.providers
@@ -328,11 +333,13 @@ class _Turn:
         self.rag_prefetch: asyncio.Task | None = None
         self._rag_prefetch_start: float | None = None
         self._router_done_at: float | None = None
+        self.text_source = text_source
         # Span хода открыт явно (не current): генератор отдаёт события через yield, и контекст
         # OTel не должен «висеть» между кусками SSE. Этапы делают его текущим только внутри
         # блоков без yield (_child), задачи ответа получают его копией контекста при создании.
+        span_source = "audio" if is_audio else ("stt_realtime" if text_source == "stt" else "text")
         self.span = get_tracer().start_span("turn", attributes={
-            "session.id": session_id, "input.source": "audio" if is_audio else "text",
+            "session.id": session_id, "input.source": span_source,
             **({"language_hint": hint} if hint else {}),
         })
         ctx = self.span.get_span_context()
@@ -441,7 +448,7 @@ class _Turn:
             source = "stt"
         else:
             tr = Transcript(text=text or "", language=hint)
-            source = "text"
+            source = self.text_source
 
         async with self.ctx.mutate(self.sid, author="system") as mutation:
             mutation.focus_task(self.task_id)

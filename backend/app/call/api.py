@@ -26,11 +26,12 @@ from pydantic import BaseModel, Field, model_validator
 
 from app.call.ports import Providers
 from app.call.service import CallService
-from app.config import DATASET_TODAY
+from app.config import DATASET_TODAY, settings
 from app.context import SessionContext, SessionNotFound
 from app.docs import SSE_EXAMPLE
 from app.kernel import KernelError, TurnRequest
 from app.router import RouterResult
+from app.speech import ProviderUnavailable, RealtimeSession, create_realtime_stt_session
 
 MAX_AUDIO_BYTES = 10 * 1024 * 1024
 
@@ -157,6 +158,11 @@ class TextTurn(TurnRequest):
     )
     language_hint: Literal["ru", "kk"] | None = Field(
         None, description="Подсказка языка; роутер всё равно определяет язык сам"
+    )
+    source: Literal["text", "stt"] = Field(
+        "text",
+        description="`stt` — текст уже распознан realtime STT в браузере (WebRTC); "
+        "событие transcript и трассировка помечаются как реальная речь, а не ручной ввод",
     )
 
 
@@ -286,14 +292,35 @@ async def reset_call(session_id: SessionId, calls: Calls, request: Request) -> S
 async def text_turn(
     session_id: TurnSession, body: TextTurn, calls: Calls, request: Request
 ) -> StreamingResponse:
-    trace_request(request, session_id, **{"input.source": "text",
-                                          "language_hint": body.language_hint})
+    trace_request(request, session_id, **{
+        "input.source": "stt_realtime" if body.source == "stt" else "text",
+        "language_hint": body.language_hint,
+        **({"stt.model": settings.stt_model} if body.source == "stt" else {}),
+    })
     request_id, is_new = await calls.ingress(
-        session_id, text=body.text, language_hint=body.language_hint,
+        session_id, text=body.text, language_hint=body.language_hint, source=body.source,
         request_id=body.request_id, task_id=body.task_id, updates=body.updates,
         interrupt_previous=body.interrupt_previous,
     )
     return _stream_response(calls, session_id, request_id, cancel_on_disconnect=is_new)
+
+
+@router.post(
+    "/calls/{session_id}/stt/session",
+    summary="Эфемерный секрет для realtime STT (WebRTC из браузера)",
+    description="Голос клиента при включении уходит браузер → OpenAI напрямую (docs/specs/"
+    "speech-module.md). Провайдер не openai или ключа нет → 409 `stt_unavailable`, "
+    "фронт откатывается на запись и загрузку хода целиком.",
+    responses={409: {"description": "Realtime STT недоступен (mock-режим или нет ключа)"}},
+)
+async def stt_session(
+    session_id: Session, calls: Calls,
+    language_hint: Literal["ru", "kk"] | None = None,
+) -> RealtimeSession:
+    try:
+        return await create_realtime_stt_session(calls.providers.stt.name, language_hint)
+    except ProviderUnavailable as e:
+        raise HTTPException(409, e.code) from e
 
 
 
