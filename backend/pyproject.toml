@@ -12,6 +12,9 @@ dependencies = [
     "alembic",
     "openai>=2,<3",
     "python-multipart>=0.0.32",
+    "opentelemetry-api>=1.44.0",
+    "opentelemetry-sdk>=1.44.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.44.0",
 ]
 
 [dependency-groups]
