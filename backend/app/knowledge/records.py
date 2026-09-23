@@ -23,7 +23,9 @@ class Records:
     def __init__(self, store: Store):
         self._store = store
 
-    async def find_client(self, *, phone: str | None = None, iin: str | None = None) -> Client | None:
+    async def find_client(
+        self, *, phone: str | None = None, iin: str | None = None
+    ) -> Client | None:
         if phone:
             normalized = normalize_phone(phone)
             found = await self._store.find("client", phone=normalized) if normalized else []
@@ -38,14 +40,18 @@ class Records:
         return Client.model_validate(p) if p else None
 
     async def policies(self, client_id: str) -> list[Policy]:
-        return [Policy.model_validate(p) for p in await self._store.find("policy", client_id=client_id)]
+        return [
+            Policy.model_validate(p) for p in await self._store.find("policy", client_id=client_id)
+        ]
 
     async def policy(self, policy_number: str) -> Policy | None:
         p = await self._store.get("policy", policy_number)
         return Policy.model_validate(p) if p else None
 
     async def claims(self, client_id: str) -> list[Claim]:
-        return [Claim.model_validate(p) for p in await self._store.find("claim", client_id=client_id)]
+        return [
+            Claim.model_validate(p) for p in await self._store.find("claim", client_id=client_id)
+        ]
 
     async def claim(self, claim_number: str) -> Claim | None:
         p = await self._store.get("claim", claim_number.upper())

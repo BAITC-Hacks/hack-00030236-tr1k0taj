@@ -132,17 +132,17 @@ FastAPI + Next.js + PostgreSQL, Docker Compose, `just`. Один процесс 
 
 ### 4.1. Ответ роутера
 
-Формат задан README кита. Единственное, что фиксируем сами, — **порядок полей**: `scenarios` первым, чтобы стартовать исполнителя, не дожидаясь обоснования.
+Формат задан README кита (реализация — `app.router.RouterOutput`). Единственное, что фиксируем сами, — **порядок полей**: `scenarios` первым, чтобы стартовать исполнителя, не дожидаясь обоснования. `confidence` и `reason` — у каждого сценария.
 
 ```json
 {
-  "scenarios": ["SC17"],
-  "alternatives": [{"id": "SC18", "confidence": 0.31}],
+  "scenarios": [
+    {"scenario_id": "SC17", "confidence": 0.86, "reason": "проверяемые признаки и граница со сценарием-соседом"}
+  ],
+  "alternatives": [{"scenario_id": "SC18", "confidence": 0.31}],
   "language": "ru",
   "slots": {"claim_number": null},
-  "is_continuation": false,
-  "confidence": 0.86,
-  "reason": "проверяемые признаки и граница со сценарием-соседом"
+  "is_continuation": false
 }
 ```
 

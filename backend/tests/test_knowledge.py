@@ -37,7 +37,9 @@ def test_records_and_search():
                 assert [c.claim_number for c in claims] == ["CL-500311"]
 
                 exact = await kb.search.kb_lookup("claims.submission")
-                assert exact and exact.source == "kb_lookup" and exact.source_id == "claims.submission"
+                assert (
+                    exact and exact.source == "kb_lookup" and exact.source_id == "claims.submission"
+                )
                 fuzzy = await kb.search.kb_lookup("claim document submission")
                 assert fuzzy and fuzzy.source_id == "claims.submission"
 
