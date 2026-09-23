@@ -51,6 +51,7 @@ _EARLY_BREAK = re.compile(r"[,.!?;:]")
 _FILLER_TEXT = {"ru": "Секунду, проверяю.", "kk": "Бір сәт, тексеріп жатырмын."}
 _FALLBACK_REPLY = {"ru": "Извините, повторите, пожалуйста.", "kk": "Кешіріңіз, қайталап жіберіңізші."}
 _BUSY_WAIT_S = 2.0
+_KK_LETTERS = re.compile(r"[әғқңөұүһіӘҒҚҢӨҰҮҺІ]")
 _filler_cache: dict[tuple[str, str], tuple[str, bytes] | None] = {}
 _filler_locks: defaultdict[tuple[str, str], asyncio.Lock] = defaultdict(asyncio.Lock)
 
@@ -407,6 +408,7 @@ class _Turn:
         self.turn_id = 0
         self.finished = False
         self.t0 = time.perf_counter()
+        self.ack_seq = 0  # 1, если подтверждение уже прозвучало до роутера
         self.latency = Latency()
         self.stages: list[tuple[str, int, int]] = []  # (stage, start_epoch_ms, end_epoch_ms)
         self.router_out: RouterOutput | None = None
@@ -495,6 +497,22 @@ class _Turn:
             pass
         return facts
 
+    async def _early_ack(self, text: str, language: str | None) -> AudioEvent | None:
+        if not (settings.tts_filler and hasattr(self.p.tts, "stream")):
+            return None
+        lang = "kk" if language == "kk" or _KK_LETTERS.search(text) else "ru"
+        audio = await _filler_audio(self.p.tts, lang)
+        if audio is None:
+            return None
+        mime, data = audio
+        self.ack_seq = 1
+        self.latency.tts_first_audio = _ms(self.t0)
+        self.latency.total = _ms(self.t0)
+        return AudioEvent(
+            turn_id=self.turn_id, seq=0, chunk=0, final=True, filler=True, mime=mime,
+            data=base64.b64encode(data).decode(), text=_FILLER_TEXT[lang],
+        )
+
     def _stage(self, name: str, start: float) -> int:
         ms = _ms(start)
         end = _epoch_ms()
@@ -554,6 +572,10 @@ class _Turn:
             generation=snap.generation,
             context_version=snap.context_version,
         )
+        # Спикер начинает отвечать ДО роутера: короткое подтверждение из кэша звучит сразу,
+        # настоящий ответ догоняет асинхронно (роутер → исполнитель → ядро).
+        if ack := await self._early_ack(tr.text, tr.language):
+            yield ack
 
         try:
             self._rag_prefetch_start = time.perf_counter()
@@ -795,7 +817,7 @@ class _Turn:
             resp.add_event("response_first_token", {"ms": self.latency.response_first_token})
 
         send_filler = (
-            settings.tts_filler and hasattr(self.p.tts, "stream")
+            not self.ack_seq and settings.tts_filler and hasattr(self.p.tts, "stream")
             and self.decision is not None and self.decision.kind == "route"
             and not (brief.scenario_id or "").startswith("SYS_")
         )
@@ -1015,7 +1037,7 @@ class _Turn:
 
         async def run_all() -> None:
             try:
-                seq0 = await emit_filler() if send_filler else 0
+                seq0 = self.ack_seq or (await emit_filler() if send_filler else 0)
                 async with asyncio.TaskGroup() as tg:
                     tg.create_task(text_producer())
                     tg.create_task(audio_producer(seq0))
