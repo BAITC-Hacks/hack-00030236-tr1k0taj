@@ -11,7 +11,7 @@ function Shell({ children }: { children: ReactNode }) {
   const v = useVoice(); const { t } = v; const path = usePathname();
   const catalog = useCatalog();
   const [settings, setSettings] = useState(false); const [guide, setGuide] = useState(false); const [menu, setMenu] = useState(false);
-  const links = [{ href: "/", icon: "call", key: "call" }, { href: "/history", icon: "history", key: "history" }, { href: "/scenarios", icon: "grid", key: "scenarios" }] as const;
+  const links = [{ href: "/", icon: "call", key: "call" }, { href: "/history", icon: "history", key: "history" }, { href: "/traces", icon: "layers", key: "traceJournal" }, { href: "/scenarios", icon: "grid", key: "scenarios" }] as const;
   return <div className="app-shell">
     <a className="skip-link" href="#main">Skip to content / К содержимому</a>
     {menu && <button className="nav-backdrop" aria-label={t("close")} onClick={() => setMenu(false)} />}

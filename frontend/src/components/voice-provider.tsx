@@ -23,7 +23,7 @@ function useVoiceState(adapter: VoiceAdapter) {
   const [health, setHealth] = useState<"loading" | "ok" | "error">("loading");
   const [capabilities, setCapabilities] = useState<Capabilities | null>(null);
   const recorder = useRecorder(); const playback = useAudioQueue(sound, volume / 100);
-  const request = useRef<{ token: number; busy: boolean; controller?: AbortController; sessionId?: string; turnId?: number }>({ token: 0, busy: false });
+  const request = useRef<{ token: number; busy: boolean; controller?: AbortController; sessionId?: string; turnId?: number; traceparent?: string }>({ token: 0, busy: false });
   const publish = useCallback((next: Conversation | null) => { sessionRef.current = next; setSession(next); }, []);
   useEffect(() => {
     document.documentElement.lang = locale; document.documentElement.dataset.reducedMotion = String(reduced);
@@ -72,9 +72,10 @@ function useVoiceState(adapter: VoiceAdapter) {
     const cancelToken = pending.token;
     playback.player.stop(); setBusy(false);
     if (pending.sessionId && pending.turnId !== undefined) {
-      void adapter.cancel(pending.sessionId, pending.turnId).catch(() => { if (request.current.token === cancelToken) setNotice("cancelFailed"); });
+      void adapter.cancel(pending.sessionId, pending.turnId, pending.traceparent).catch(() => { if (request.current.token === cancelToken) setNotice("cancelFailed"); });
     }
     pending.turnId = undefined;
+    pending.traceparent = undefined;
     const current = sessionRef.current;
     if (current) publish({ ...current, turns: current.turns.map(turn => turn.status === "processing" ? { ...turn, status: "cancelled" } : turn) });
   }
@@ -98,6 +99,7 @@ function useVoiceState(adapter: VoiceAdapter) {
     request.current.controller?.abort();
     const controller = new AbortController(); const token = ++request.current.token;
     request.current.controller = controller; request.current.busy = true; request.current.turnId = undefined;
+    request.current.traceparent = undefined;
     setBusy(true); setNotice(null);
     const eos = typeof value === "string" ? null : recorder.endedAt;
     let firstText: number | undefined;
@@ -111,7 +113,7 @@ function useVoiceState(adapter: VoiceAdapter) {
       const timing = { eos_to_playback_ms: elapsed, eos_to_reply_text_ms: firstText };
       const visible = sessionRef.current;
       if (visible?.id === current.id) publish({ ...visible, turns: visible.turns.map(t => t.id === turn!.id ? { ...t, timings: { ...t.timings, browser_eos_to_playback: elapsed } } : t) });
-      void adapter.playback(current.id, turn.id, timing).catch(() => { if (valid()) setToast("timingFailed"); });
+      void adapter.playback(current.id, turn.id, timing, turn.traceparent).catch(() => { if (valid()) setToast("timingFailed"); });
     });
     try {
       if (!current || current.mode !== "live" || current.endedAt) {
@@ -143,7 +145,11 @@ function useVoiceState(adapter: VoiceAdapter) {
         if (event.type === "facts") current = { ...current!, facts: turn.facts };
         if (event.type === "action" && event.ok && event.mode === "handoff") current = { ...current!, outcome: "handoff" };
         commitTurn();
-      }, controller.signal);
+      }, controller.signal, metadata => {
+        if (!valid() || !turn) return;
+        request.current.traceparent = metadata.traceparent;
+        turn = { ...turn, ...metadata }; commitTurn();
+      });
       if (!valid()) return false;
       const results = await Promise.allSettled([
         adapter.context(base.id, controller.signal), adapter.debug(base.id, controller.signal), adapter.board(base.id, controller.signal),

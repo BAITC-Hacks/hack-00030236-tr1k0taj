@@ -15,7 +15,7 @@ export function applyEvent(turn: Turn, event: CallEvent): Turn {
     case "reply.done": return { ...turn, answer: event.text, language: event.language };
     case "error": return { ...turn, errors: [...(turn.errors ?? []), event], status: event.fatal ? "error" : turn.status };
     case "turn.cancelled": return { ...turn, status: "cancelled" };
-    case "turn.done": return { ...turn, text: event.transcript, answer: event.reply, language: event.language ?? "—", scenarios: event.scenarios, alternatives: event.alternatives, slots: event.slots, contextVersion: event.context_version, raw: event, status: turn.errors?.length ? "error" : "done", timings: { ...turn.timings, ...Object.fromEntries(Object.entries(event.latency_ms).filter((entry): entry is [string, number] => typeof entry[1] === "number")) } };
+    case "turn.done": return { ...turn, traceId: event.trace_id ?? turn.traceId, text: event.transcript, answer: event.reply, language: event.language ?? "—", scenarios: event.scenarios, alternatives: event.alternatives, slots: event.slots, contextVersion: event.context_version, raw: event, status: turn.errors?.length ? "error" : "done", timings: { ...turn.timings, ...Object.fromEntries(Object.entries(event.latency_ms).filter((entry): entry is [string, number] => typeof entry[1] === "number")) } };
     default: return turn;
   }
 }

@@ -34,5 +34,5 @@ export type CallEvent = { turn_id: number } & (
   | ActionEvent | { type: "facts"; facts: ContextFact[] }
   | { type: "reply.delta"; text: string } | { type: "reply.done"; text: string; language: string }
   | AudioEvent | CallError | { type: "turn.cancelled" }
-  | { type: "turn.done"; transcript: string; language: string | null; scenarios: Route[]; alternatives: Route[]; reason: string; slots: Record<string, unknown>; actions: string[]; reply: string; latency_ms: Record<string, number | null>; context_version: number }
+  | { type: "turn.done"; trace_id?: string | null; transcript: string; language: string | null; scenarios: Route[]; alternatives: Route[]; reason: string; slots: Record<string, unknown>; actions: string[]; reply: string; latency_ms: Record<string, number | null>; context_version: number }
 );

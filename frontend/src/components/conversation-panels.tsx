@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import Link from "next/link";
 import type { Conversation, Fact, Turn } from "@/lib/types";
 import { useCatalog } from "./catalog-provider";
 import { useVoice } from "./voice-provider";
@@ -23,7 +24,7 @@ export function TracePanel({ session, turn, onSelect }: { session: Conversation 
   const { scenarioTitle } = useCatalog();
   const { t, locale, copy } = useVoice(); const [raw, setRaw] = useState(false); const [rawTab, setRawTab] = useState<"response" | "prompt">("response");
   if (!turn) return <EmptyState icon="layers" title={t("noTrace")} description={t("noTraceText")} />;
-  return <div className="trace-body"><div className="trace-picker"><label>{t("turn")}<select value={turn.id} onChange={e => onSelect?.(Number(e.target.value))}>{session?.turns.map(item => <option key={item.id} value={item.id}>{item.id} · {item.text.slice(0, 35)}</option>)}</select></label><span className="badge">{turn.language.toUpperCase()}</span></div>
+  return <div className="trace-body">{session?.mode === "live" && <Link className="button secondary full-width" href={`/traces?session=${encodeURIComponent(session.id)}${turn.traceId ? `&trace=${encodeURIComponent(turn.traceId)}` : ""}`}><Icon name="layers" size={16} />{t("serverTrace")}</Link>}<div className="trace-picker"><label>{t("turn")}<select value={turn.id} onChange={e => onSelect?.(Number(e.target.value))}>{session?.turns.map(item => <option key={item.id} value={item.id}>{item.id} · {item.text.slice(0, 35)}</option>)}</select></label><span className="badge">{turn.language.toUpperCase()}</span></div>
     {session?.mode === "example" && <p className="sample-note">{t("reviewOnly")}</p>}
     {!!turn.errors?.length && <details className="disclosure"><summary>{t("error")}</summary>{turn.errors.map((error, index) => <p key={index}>{error.stage} · {error.code}<br />{error.message}</p>)}</details>}<div className="trace-utterance">“{turn.text}”</div><h4 className="section-label">{t("route")}</h4>
     {!turn.scenarios.length && <p className="muted">{t("noRoute")}</p>}{turn.scenarios.map(route => <article className="route-card" key={route.scenario_id}><div><span className="scenario-id">{route.scenario_id}</span><Icon name="check" size={17} /></div><h3>{scenarioTitle(route.scenario_id)}</h3>{route.reason && <p>{route.reason}</p>}{route.confidence !== undefined && <p className="confidence">{route.confidence.toLocaleString(locale, { maximumFractionDigits: 2 })} · {t("confidence")}</p>}</article>)}
