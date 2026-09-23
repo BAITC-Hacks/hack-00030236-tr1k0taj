@@ -73,6 +73,7 @@ def package(state, response_id=None, *, agent=None, task_id=None):
         "segment_index": len(response.get("segments", [])),
         "consumed_board_seq": state["last_seq"],
         "context_truncated": False, "omitted_records": 0,
+        "blocking_incomplete": list(response.get("blocking_incomplete", [])),
     }
     if _size(result) > MAX_PACKAGE_CHARS:
         raise ValueError("mandatory_context_exceeds_budget")

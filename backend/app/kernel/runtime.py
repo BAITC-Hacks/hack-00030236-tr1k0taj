@@ -22,7 +22,7 @@ from app.context import (
     update_task,
 )
 from app.kernel.context import package, snapshot
-from app.kernel.provider import ProviderError
+from app.kernel.provider import BackgroundResult, ProviderError
 from app.kernel.store import KernelError, Repository, event
 from app.kernel.types import (
     BlackboardReadArgs,
@@ -98,7 +98,8 @@ class Runtime:
         self.main_tasks = {}
         self.background_tasks = defaultdict(dict)
         self.tool_tasks = {}
-        self.tool_owners = defaultdict(list)
+        self.tool_cache_expiry = {}
+        self.tool_cache_order = []
         self.retired_tasks = set()
         self.trace_links = {}  # sid → span хода, в памяти: link для фоновых agent.run
         self.semaphores = defaultdict(lambda: asyncio.Semaphore(settings.kernel_background_parallelism))
@@ -117,8 +118,14 @@ class Runtime:
         for key, task in list(self.tool_tasks.items()):
             if key[0] == sid:
                 task.cancel()
-                self.tool_tasks.pop(key)
+                self._forget_tool_cache(key)
         self.signals[sid].set()
+
+    def _forget_tool_cache(self, key):
+        self.tool_tasks.pop(key, None)
+        self.tool_cache_expiry.pop(key, None)
+        if key in self.tool_cache_order:
+            self.tool_cache_order.remove(key)
 
     async def stream_turn(self, sid, turn_id, transcript, brief, *, request_id=None,
                           task_id="default", updates=None, interrupt_previous=False,
@@ -302,14 +309,8 @@ class Runtime:
             run = state["runs"].get(run_id)
             if run is None or not self._fresh(state, run):
                 self._cancel_task(task)
-        # Results are cached by task/fingerprint; unrelated background requests survive new input.
-        for key, task in list(self.tool_tasks.items()):
-            if key[0] != sid:
-                continue
-            if not any(self._fresh(state, owner) for owner in self.tool_owners[key]):
-                self._cancel_task(task)
-                self.tool_tasks.pop(key)
-                self.tool_owners.pop(key, None)
+        # The tool cache is keyed by (session, name, args) only, TTL/FIFO-bounded: it
+        # deliberately survives new input/turns instead of being tied to a run's freshness.
 
     async def create(self, request):
         state = await self.repo.create(
@@ -371,8 +372,11 @@ class Runtime:
             if request.key != "$message":
                 pending.extend(self._refresh_messages(state, [request.task_id]))
             return {"record": self._record_metadata(record)}, pending
-        return await self._control(sid, "record", request.request_id,
-                                   request.model_dump(mode="json"), mutate)
+        result = await self._control(sid, "record", request.request_id,
+                                     request.model_dump(mode="json"), mutate)
+        if request.key != "$message":
+            await self.schedule(sid, "record.changed", request.task_id, changed_keys={request.key})
+        return result
 
     async def list_records(self, sid, task_id=None):
         state = await self.repo.get(sid)
@@ -514,10 +518,40 @@ class Runtime:
     async def _launch(self, sid, rid, *, voice=False):
         state = await self.repo.get(sid)
         response = self._active(state, rid)
-        await self.schedule(sid, "user.message", response.get("task_id", "default"))
+        task_id = response.get("task_id", "default")
+        await self.schedule(sid, "user.message", task_id)
+        await self._await_blocking(sid, rid, task_id)
         await self.respond(sid, rid, voice=voice)
 
-    async def schedule(self, sid, trigger, task_id=None):
+    async def _await_blocking(self, sid, rid, task_id):
+        """Give `blocking` agents up to their deadline before the first segment starts."""
+        state = await self.repo.get(sid)
+        deadlines = {a["agent_id"]: a["deadline_ms"] for a in state["agents"] if a.get("blocking")}
+        if not deadlines:
+            return
+        pending = [(run["agent_id"], self.background_tasks[sid].get(run_id))
+                   for run_id, run in state["runs"].items()
+                   if run["agent_id"] in deadlines and run.get("task_id", "default") == task_id
+                   and run["status"] in ("queued", "running")]
+        pending = [(agent_id, task) for agent_id, task in pending if task is not None]
+        if not pending:
+            return
+        deadline = max(deadlines[agent_id] for agent_id, _ in pending) / 1000
+        done, _ = await asyncio.wait([task for _, task in pending], timeout=deadline)
+        incomplete = sorted({agent_id for agent_id, task in pending if task not in done})
+        if not incomplete:
+            return
+        async with self.locks[sid]:
+            def mark(state, seq):
+                response = state["responses"].get(rid)
+                if response is None or response["status"] != "generating":
+                    return None, []
+                response["blocking_incomplete"] = incomplete
+                return None, [event("agent.blocking_timeout", {"agent_ids": incomplete},
+                                    turn_id=response["turn_id"])]
+            await self._change(sid, mark)
+
+    async def schedule(self, sid, trigger, task_id=None, changed_keys=None):
         async with self.locks[sid]:
             def apply(state, seq):
                 if state["status"] != "open":
@@ -527,28 +561,86 @@ class Runtime:
                 if board["tasks"].get(scope, {}).get("status") != "active":
                     return [], []
                 revision = state["input_revision"]
+                turn_id = state["next_turn_id"] - 1
+                budget = state.setdefault("run_budget", {"turn_id": turn_id, "turn_runs": 0,
+                                                          "session_runs": 0})
+                if budget["turn_id"] != turn_id:
+                    budget["turn_id"], budget["turn_runs"] = turn_id, 0
+                budget_exhausted = False
                 scoped = [r for r in state["runs"].values()
                           if r.get("task_id", "default") == scope and self._fresh(state, r)]
                 finished = {r["agent_id"] for r in scoped if r["status"] == "completed"}
+
+                def latest_run(agent_id):
+                    latest = None
+                    for r in state["runs"].values():
+                        if r["agent_id"] == agent_id and r.get("task_id", "default") == scope:
+                            latest = r
+                    return latest
+
                 jobs, events = [], []
                 for agent in state["agents"]:
                     reads = list(dict.fromkeys([*agent.get("reads", ["$message"]),
                         *(f"agent:{parent}" for parent in agent.get("depends_on", []))]))
                     versions = input_versions(state, scope, reads)
-                    existing = any(r["agent_id"] == agent["agent_id"]
-                                   and r.get("read_versions") == versions for r in scoped)
-                    if (trigger not in agent["on"] or existing
-                            or not set(agent["depends_on"]).issubset(finished)):
+                    if trigger == "record.changed" and changed_keys is not None and not (
+                        set(reads) & changed_keys
+                    ):
                         continue
+                    matches = [r for r in scoped if r["agent_id"] == agent["agent_id"]
+                               and r.get("read_versions") == versions]
+                    if any(r["status"] in ("queued", "running", "completed", "blocked")
+                           for r in matches):
+                        continue
+                    # Any leftover match here is a "failed" run (others are filtered above).
+                    # Exactly one retry per fingerprint: once a retry itself fails, stop.
+                    if any(r.get("retry_of") for r in matches):
+                        continue
+                    retrying = bool(matches)
+                    if not retrying and trigger not in agent["on"]:
+                        continue
+                    blocked_by = []
+                    ready = True
+                    for parent in agent["depends_on"]:
+                        if parent in finished:
+                            continue
+                        parent_run = latest_run(parent)
+                        if parent_run is not None and (
+                            parent_run["status"] in ("stale", "blocked")
+                            or (parent_run["status"] == "failed" and parent_run.get("retry_of"))
+                        ):
+                            blocked_by.append(parent)
+                        else:
+                            ready = False
+                    if not blocked_by and not ready:
+                        continue
+                    if (budget["session_runs"] >= settings.kernel_max_runs_per_session
+                            or budget["turn_runs"] >= settings.kernel_max_runs_per_turn):
+                        if not budget_exhausted:
+                            budget_exhausted = True
+                            events.append(event("graph.budget_exhausted", {
+                                "turn_runs": budget["turn_runs"], "session_runs": budget["session_runs"],
+                            }, author="scheduler", turn_id=turn_id))
+                        continue
+                    budget["turn_runs"] += 1
+                    budget["session_runs"] += 1
                     run = {"run_id": str(uuid4()), "agent_id": agent["agent_id"],
                            "task_id": scope, "read_versions": versions,
                            "input_expires_at": self._input_expiry(state, scope, agent),
                            "input_revision": revision, "generation": state["generation"],
-                           "turn_id": state["next_turn_id"] - 1, "status": "queued"}
+                           "turn_id": turn_id, "status": "blocked" if blocked_by else "queued"}
+                    if retrying:
+                        run["retry_of"] = matches[-1]["run_id"]
                     state["runs"][run["run_id"]] = run
-                    jobs.append((agent, run))
-                    events.append(event("agent.queued", run, author=agent["agent_id"],
-                                        turn_id=run["turn_id"]))
+                    if blocked_by:
+                        events.append(event("agent.blocked", {
+                            "run_id": run["run_id"], "agent_id": agent["agent_id"],
+                            "blocked_by": blocked_by,
+                        }, author=agent["agent_id"], turn_id=turn_id))
+                    else:
+                        jobs.append((agent, run))
+                        events.append(event("agent.queued", run, author=agent["agent_id"],
+                                            turn_id=run["turn_id"]))
                 return jobs, events
             jobs = await self._change(sid, apply)
             for agent, run in jobs:
@@ -581,9 +673,11 @@ class Runtime:
                         if name not in agent["tools"]:
                             return {"error": "tool_not_allowed"}
                         return await self.tool(sid, run, agent["agent_id"], name, args)
-                    result = await self.driver.run_background(
-                        agent, package(state, agent=agent, task_id=run.get("task_id", "default")), tool,
-                    )
+                    ctx = package(state, agent=agent, task_id=run.get("task_id", "default"))
+                    if agent.get("mode", "llm") == "reader":
+                        result = await self._read_only_result(ctx, tool)
+                    else:
+                        result = await self.driver.run_background(agent, ctx, tool)
                     async with self.locks[sid]:
                         def finish(state, seq):
                             accepted = self._fresh(state, run)
@@ -616,6 +710,8 @@ class Runtime:
         except Exception as exc:  # noqa: BLE001 — isolate provider/task failures
             log.warning("Background run failed: %s", type(exc).__name__)
             await self._run_status(sid, run, "failed")
+            # Give the failed run exactly one retry, and unblock/re-check dependents.
+            await self.schedule(sid, "agent.result", run.get("task_id", "default"))
 
     @staticmethod
     def _fresh(state, run):
@@ -660,10 +756,13 @@ class Runtime:
                     def finish(state, seq):
                         response = self._active(state, rid)
                         response["status"] = "completed"
-                        return None, [event("response.completed", {"finish_reason":
+                        return response["task_id"], [event("response.completed", {"finish_reason":
                             "segment_limit" if result.continue_response else "stop"},
                             author="main", public=True, response_id=rid, turn_id=response["turn_id"])]
-                    await self._change(sid, finish)
+                    task_id = await self._change(sid, finish)
+                # Background keeps working between turns; it only ever lands on the board,
+                # never re-opens speech/public events for an already-completed response.
+                await self.schedule(sid, "response.completed", task_id)
         except asyncio.CancelledError:
             pass
         except Exception as exc:  # noqa: BLE001 — isolate provider/task failures
@@ -799,15 +898,37 @@ class Runtime:
         return result
 
     async def _shared_tool(self, sid, run, name, args):
-        fingerprint = ("background", run["read_versions"]) if "read_versions" in run else (
-            "main", run["input_revision"]
-        )
-        key = (sid, run["generation"], run.get("task_id", "default"),
-               json.dumps(fingerprint, sort_keys=True), name, json.dumps(args, sort_keys=True))
+        # Base data is read-only: identical calls are cached across turns/generations,
+        # bounded only by a TTL and a FIFO cap (not by the requesting run's freshness).
+        key = (sid, name, json.dumps(args, sort_keys=True))
+        now = time.time()
+        if key in self.tool_tasks and self.tool_cache_expiry.get(key, 0) <= now:
+            self._forget_tool_cache(key)
         if key not in self.tool_tasks:
+            while len(self.tool_cache_order) >= 64:
+                self._forget_tool_cache(self.tool_cache_order[0])
             self.tool_tasks[key] = asyncio.create_task(self._execute_tool(name, args))
-        self.tool_owners[key].append(run)
+            self.tool_cache_expiry[key] = now + settings.kernel_tool_cache_ttl
+            self.tool_cache_order.append(key)
         return await asyncio.shield(self.tool_tasks[key])
+
+    @staticmethod
+    async def _read_only_result(ctx, tool):
+        """`mode: reader` agent: no model call, only a direct rag_search/rag_read (~200ms)."""
+        brief = ctx.get("context", {}).get("call_brief", {})
+        query = brief.get("search_query") or ctx.get("user_text") or ""
+        if not query.strip():
+            return BackgroundResult("")
+        result = await tool("rag_search", {
+            "query": query, "search_query": brief.get("search_query"),
+            "kinds": ["kb"], "limit": 3,
+        })
+        hits = result.get("hits", []) if isinstance(result, dict) else []
+        source_ids = [hit["source_id"] for hit in hits if hit.get("source_id")]
+        facts = [{"text": hit.get("content", ""), "source_ids": [hit["source_id"]]}
+                 for hit in hits if hit.get("source_id")]
+        summary = " ".join(hit.get("content", "") for hit in hits)[:1800]
+        return BackgroundResult(summary, facts, source_ids)
 
     async def _execute_tool(self, name, args):
         try:
@@ -909,7 +1030,7 @@ class Runtime:
             for key, task in list(self.tool_tasks.items()):
                 if key[0] == sid:
                     task.cancel()
-                    self.tool_tasks.pop(key)
+                    self._forget_tool_cache(key)
         return result
 
     async def shutdown(self):
