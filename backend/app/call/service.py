@@ -9,6 +9,7 @@ import base64
 import hashlib
 import itertools
 import json
+import re
 import time
 from collections import Counter, defaultdict
 from collections.abc import AsyncIterator, Iterator
@@ -52,6 +53,20 @@ def _ms(start: float, end: float | None = None) -> int:
 
 def _epoch_ms() -> int:
     return time.time_ns() // 1_000_000
+
+
+# perf (voice-router-spec 10.3): synthesize the kernel path's first segment as soon as its
+# first sentence is complete instead of waiting for the whole segment, so TTS starts sooner.
+_FIRST_SENTENCE_MIN_CHARS = 40
+_EARLY_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?…])\s+|\n+")
+
+
+def _first_sentence_end(buffer: str, min_chars: int = _FIRST_SENTENCE_MIN_CHARS) -> int | None:
+    """Index in `buffer` where its first sentence ends, once it is at least `min_chars` long."""
+    for m in _EARLY_SENTENCE_BOUNDARY.finditer(buffer):
+        if m.start() >= min_chars:
+            return m.start()
+    return None
 
 
 class _Cancelled(Exception):
@@ -685,6 +700,10 @@ class _Turn:
         async def kernel_text_producer() -> None:
             full, first, response_id = "", True, None
             segment_text: dict[str, str] = {}
+            # perf: split off the first sentence of the first segment as soon as it is ready,
+            # instead of waiting for segment.completed, so TTS starts on partial text.
+            first_segment_id: str | None = None
+            first_sentence_end: int | None = None
             snapshot = await self.ctx.snapshot(self.sid)
             context = brief.model_dump(mode="json") | {
                 "generation": snapshot.generation,
@@ -712,12 +731,25 @@ class _Turn:
                     full += delta
                     if segment_id:
                         segment_text[segment_id] = segment_text.get(segment_id, "") + delta
+                        if first_segment_id is None:
+                            first_segment_id = segment_id
+                        if segment_id == first_segment_id and first_sentence_end is None:
+                            idx = _first_sentence_end(segment_text[segment_id])
+                            if idx is not None:
+                                first_sentence_end = idx
+                                sentence = segment_text[segment_id][:idx].strip()
+                                if sentence:
+                                    await sentences.put((sentence, response_id, segment_id))
                     await out.put(ReplyDeltaEvent(
                         turn_id=self.turn_id, text=delta,
                         response_id=response_id, segment_id=segment_id,
                     ))
                 elif kind == "segment.completed":
-                    if sentence := segment_text.get(segment_id, "").strip():
+                    text = segment_text.get(segment_id, "")
+                    rest = text[first_sentence_end:] if (
+                        segment_id == first_segment_id and first_sentence_end is not None
+                    ) else text
+                    if sentence := rest.strip():
                         await sentences.put((sentence, response_id, segment_id))
                 elif kind == "response.interrupted":
                     raise _Cancelled
