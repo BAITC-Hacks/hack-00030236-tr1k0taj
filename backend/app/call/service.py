@@ -695,7 +695,7 @@ class _Turn:
         s.set_attributes({
             "gen_ai.request.model": rr.model, "gen_ai.response.model": rr.model,
             **{f"gen_ai.usage.{k}": v for k, v in usage.items()
-               if k in ("input_tokens", "output_tokens")},
+               if k in ("input_tokens", "output_tokens", "cached_input_tokens")},
             "router.decision": d.kind, "router.scenario_id": top.scenario_id,
             "router.confidence": top.confidence,
             "router.alternatives": _json([a.model_dump() for a in out.alternatives]),

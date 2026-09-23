@@ -3,7 +3,7 @@
 Боевой LLM-роутер реализует порт `app.call.ScenarioRouter` и живёт здесь же.
 """
 
-from app.router.openai_router import OpenAIRouter, RouterUnavailable
+from app.router.openai_router import OpenAIRouter, RouterUnavailable, warmup
 from app.router.policy import CLARIFY, ROUTE, Decision, decide
 from app.router.types import (
     Alternative,
@@ -27,4 +27,5 @@ __all__ = [
     "ScenarioPick",
     "UnknownScenario",
     "decide",
+    "warmup",
 ]
