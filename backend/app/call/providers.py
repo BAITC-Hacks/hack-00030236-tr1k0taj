@@ -5,9 +5,26 @@ from app.call.mocks import MockRouter
 from app.call.ports import Providers
 from app.config import Settings
 from app.executor import BaselineExecutor, NoopBackground, TemplateResponder
-from app.speech import STT, TTS, build_stt, build_tts
+from app.knowledge import Knowledge
+from app.router import OpenAIRouter, RouterResult, RouterUnavailable
+from app.speech import STT, TTS, ProviderUnavailable, build_stt, build_tts
 
-LLM = {"mock": MockRouter}
+
+class _RouterErrors:
+    """Переводит ошибку роутера в ProviderUnavailable: ход не падает, SSE отдаёт error с кодом."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.name = inner.name
+
+    async def route(self, utterance: str, view: dict, kb: Knowledge) -> RouterResult:
+        try:
+            return await self._inner.route(utterance, view, kb)
+        except RouterUnavailable as e:
+            raise ProviderUnavailable("router", e.code, e.message) from e
+
+
+LLM = {"mock": MockRouter, "openai": lambda: _RouterErrors(OpenAIRouter())}
 
 __all__ = ["LLM", "STT", "TTS", "build_providers"]
 

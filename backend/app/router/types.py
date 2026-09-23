@@ -42,6 +42,7 @@ class RouterResult(BaseModel):
     model: str
     prompt: str | None = None
     raw: str | None = None
+    usage: dict[str, int] | None = None  # input_tokens / output_tokens / cached_input_tokens
 
 
 class UnknownScenario(ValueError):
