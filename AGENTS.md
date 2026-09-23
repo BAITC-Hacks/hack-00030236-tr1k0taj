@@ -6,7 +6,7 @@
 [план/контракт](docs/specs/agent-kernel.md): по поручению владельца они заменяют старые
 ограничения одного фона, двух LLM-вызовов, отсутствия streaming и прямой публикации доски.
 Остальные предметные инварианты сохраняются. Реализация — в `feat/blackboard-core`.
-Для развития blackboard действует [ADR 0014](docs/adr/0014-blackboard-context-v2.md) и
+Для развития blackboard действует [ADR 0015](docs/adr/0015-blackboard-context-v2.md) и
 [пошаговый план v2](docs/specs/blackboard-v2.md); ядро допускает разные предметные области,
 страховой адаптер и инварианты стартового кита сохраняются.
 **Источник правды — этот файл.** `CLAUDE.md` только подключает его. Если правила расходятся, прав `AGENTS.md`.
@@ -50,6 +50,7 @@
 | [0009](docs/adr/0009-modular-backend.md) | Модули с публичным API, типы у владельца, без общего `schemas/` |
 | [0012](docs/adr/0012-module-layers.md) | Слои модулей и проверка импортов |
 | [0013](docs/adr/0013-tracer-opentelemetry.md) | Tracer: трассировка OpenTelemetry |
+| [0014](docs/adr/0014-kazakh-kb-search.md) | Казахский поиск по KB: ru/kk-расширения, несколько векторов, `just eval-search` |
 
 ## Роли (3 человека)
 

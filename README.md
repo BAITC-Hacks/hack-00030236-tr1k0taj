@@ -161,9 +161,8 @@ just up
 Проверки без Docker: `just db-local`, `just migrate-local`, `just test-local`,
 `just smoke-local`. Для другой тестовой БД передайте `DATABASE_URL`; не используйте
 старую экспериментальную базу с `0002_agent_kernel` для новой цепочки миграций.
-Поиск сейчас имеет собственный public-document индекс и lexical fallback;
-расширения ru/kk, kit_variants и embedding_cache из неопубликованной ветки коллеги
-остаются отдельной интеграцией. English `search_query` и top-3 уже есть в контракте.
+Поиск использует public-document индекс, ru/kk-расширения, кэш эмбеддингов и lexical fallback.
+Агенты передают English `search_query`; RAG сохраняет top-3 и provenance источников (PR #14).
 
 ### Blackboard v2
 
@@ -183,3 +182,7 @@ just up
 Повтор одного `request_id` с другим телом возвращает 409. Task/update-команды передаёт
 интегратор явно. Запуск — один backend worker; автоматическое восстановление вычислений
 после рестарта и production-авторизация в эту поставку не входят.
+
+### Поиск по KB на казахском
+
+KB в ките на английском, поэтому для каждой темы заранее сгенерированы вопросы клиентов на ru/kk/вперемешку (`backend/app/knowledge/expansions.json`, `just expand-kb`), у записи несколько векторов, а kernel передаёт в `rag_query` английский `search_query`. Качество — `just eval-search` (47 запросов), recall@1 / @3: kk 0.96 / 1.00 с `search_query`, 0.84 / 0.96 без ключа; ru и mixed — 1.00 / 1.00. Подробности и ограничения: [ADR 0014](docs/adr/0014-kazakh-kb-search.md).

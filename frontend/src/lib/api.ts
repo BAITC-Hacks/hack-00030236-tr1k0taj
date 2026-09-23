@@ -1,0 +1,60 @@
+import type { VoiceAdapter } from "./types";
+import type { CallEvent } from "./call-contract";
+import { readSSE } from "./sse";
+
+export class ApiError extends Error {
+  constructor(public status: number, message = `HTTP ${status}`) { super(message); }
+}
+async function request(path: string, init?: RequestInit) {
+  const response = await fetch(`/api${path}`, { cache: "no-store", ...init });
+  if (!response.ok) throw new ApiError(response.status);
+  return response;
+}
+async function json<T>(path: string, signal: AbortSignal, body?: unknown): Promise<T> {
+  signal = AbortSignal.any([signal, AbortSignal.timeout(15000)]);
+  const response = await request(path, body === undefined ? { signal } : {
+    signal, method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  return response.json();
+}
+export async function readHealth(signal: AbortSignal) {
+  const value = await json<{ status: string }>("/health", signal);
+  if (value.status !== "ok") throw new Error("Invalid health response");
+  return value;
+}
+export const voiceAdapter: VoiceAdapter = {
+  available: true,
+  async capabilities(signal) {
+    const caps = await json<import("./call-contract").Capabilities>("/capabilities", signal);
+    if (!caps.providers || !Array.isArray(caps.audio_input)) throw new Error("Call API contract changed");
+    return caps;
+  },
+  create: (id, signal) => json("/calls", signal, { session_id: id }),
+  context: (id, signal) => json(`/sessions/${encodeURIComponent(id)}/context`, signal),
+  board: (id, signal) => json(`/sessions/${encodeURIComponent(id)}/board`, signal),
+  debug: (id, signal) => json(`/calls/${encodeURIComponent(id)}/router/last`, signal),
+  async stream(id, value, receive, signal) {
+    const audio = typeof value !== "string";
+    const form = new FormData();
+    if (audio) form.set("audio", value, `utterance.${value.type.includes("ogg") ? "ogg" : value.type.includes("wav") ? "wav" : "webm"}`);
+    const response = await request(`/calls/${encodeURIComponent(id)}/turns/${audio ? "audio" : "text"}`, {
+      method: "POST", signal, headers: audio ? undefined : { "Content-Type": "application/json" },
+      body: audio ? form : JSON.stringify({ text: value }),
+    });
+    if (!response.body || !response.headers.get("content-type")?.includes("text/event-stream")) throw new Error("Expected SSE");
+    let terminal = false;
+    await readSSE(response.body, data => {
+      if (!data || typeof data !== "object" || !("type" in data) || !("turn_id" in data) || typeof data.type !== "string" || typeof data.turn_id !== "number") throw new Error("Invalid SSE envelope");
+      const event = data as CallEvent;
+      terminal ||= event.type === "turn.done" || event.type === "turn.cancelled" || (event.type === "error" && event.fatal);
+      receive(event);
+    }, signal);
+    if (!terminal) throw new Error("Incomplete response stream");
+  },
+  async cancel(id, turnId) { await request(`/calls/${encodeURIComponent(id)}/turns/${turnId}/cancel`, { method: "POST" }); },
+  async playback(id, turnId, timing) {
+    await request(`/calls/${encodeURIComponent(id)}/turns/${turnId}/playback`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(timing),
+    });
+  },
+};

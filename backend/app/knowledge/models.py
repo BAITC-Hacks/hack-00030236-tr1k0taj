@@ -55,6 +55,9 @@ class KnowledgeVector(Base):
 
     kind: Mapped[str] = mapped_column(String(32), primary_key=True)
     key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    # Several vectors per record: 0 = original text, 1.. = ru/kk/mixed questions (ADR 0010).
+    # text_hash versions the whole record (md5 of kit_records.search_text), not the variant.
+    idx: Mapped[int] = mapped_column(primary_key=True, server_default="0")
     model: Mapped[str] = mapped_column(String(128))
     dimensions: Mapped[int]
     text_hash: Mapped[str] = mapped_column(String(32))
