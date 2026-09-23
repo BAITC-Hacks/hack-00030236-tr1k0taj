@@ -6,6 +6,7 @@
 
 import asyncio
 import base64
+import itertools
 import json
 import time
 from collections import Counter, defaultdict
@@ -247,8 +248,8 @@ class _Turn:
                 provider = self.p.router.name
                 with self._child("router", {
                     "gen_ai.operation.name": "chat", "gen_ai.provider.name": provider,
-                    **({"gen_ai.usage.input_tokens": 0, "gen_ai.usage.output_tokens": 0}
-                       if provider == "mock" else {}),
+                    **({"gen_ai.request.model": "mock", "gen_ai.usage.input_tokens": 0,
+                        "gen_ai.usage.output_tokens": 0} if provider == "mock" else {}),
                 }) as s:
                     try:
                         rr = await self.p.router.route(tr.text, router_view(snap), kb)
@@ -540,11 +541,13 @@ class _Turn:
             ))
 
         async def audio_producer() -> None:
-            seq = 0
-            while (job := await sentences.get()) is not None:
+            seq = 0  # номер отданного аудио; tts.seq — номер предложения, даже без аудио
+            for index in itertools.count():
+                if (job := await sentences.get()) is None:
+                    break
                 sentence, response_id, segment_id = job
                 with span("tts.sentence", {
-                    "session.id": self.sid, "turn.id": self.turn_id, "tts.seq": seq,
+                    "session.id": self.sid, "turn.id": self.turn_id, "tts.seq": index,
                     "tts.chars": len(sentence.strip()), "tts.provider": self.p.tts.name,
                     "response.id": response_id, "segment.id": segment_id,
                 }) as ts:
