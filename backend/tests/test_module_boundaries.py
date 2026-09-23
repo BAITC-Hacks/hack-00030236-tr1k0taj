@@ -9,8 +9,7 @@ APP = Path(__file__).resolve().parents[1] / "app"
 LAYERS = [
     {"main"},
     {"call", "docs"},
-    {"speech"},
-    {"kernel", "router", "executor"},
+    {"speech", "kernel", "router", "executor"},  # speech и agent-слой независимы
     {"context", "knowledge"},
     {"tracer", "config", "db"},
 ]
