@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from time import time_ns
 from uuid import uuid4
 
-from app.context import BoardEntry, SessionContext
+from app.context import BoardEntry, SessionContext, ensure_blackboard
 
 
 class KernelJournal:
@@ -60,7 +60,7 @@ class KernelJournal:
 
     @staticmethod
     def _fresh(ctx: SessionContext, agents: list, context: dict, mode: str) -> dict:
-        return {
+        slot = {
             "session_id": ctx.session_id,
             "generation": ctx.generation,
             "input_revision": 0,
@@ -76,3 +76,5 @@ class KernelJournal:
             "background": [],
             "requests": {},
         }
+        ensure_blackboard(slot)
+        return slot

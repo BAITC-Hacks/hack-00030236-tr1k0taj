@@ -11,10 +11,14 @@ from app.kernel.context import history, snapshot
 from app.kernel.runtime import Runtime
 from app.kernel.store import KernelError
 from app.kernel.types import (
+    BackgroundCancelRequest,
     CreateSession,
     InterruptRequest,
     PlaybackRequest,
+    RecordRequest,
     SessionSnapshot,
+    TaskId,
+    TaskRequest,
     TurnAccepted,
     TurnRequest,
 )
@@ -32,13 +36,14 @@ Kernel = Annotated[Runtime, Depends(runtime)]
 @router.get("/kernel/capabilities")
 async def capabilities():
     return {
-        "protocol_version": 1, "mode": "mock" if settings.mock_mode else "live",
+        "protocol_version": 2, "mode": "mock" if settings.mock_mode else "live",
         "streaming": "sse", "playback": "segment-timeline-v1",
         "llm_configured": bool(settings.openai_api_key),
         "embeddings_configured": settings.embeddings_enabled and bool(settings.openai_api_key),
         "rag": True, "audio": False, "single_worker": True,
         "max_agents": 8, "max_segments": settings.kernel_max_segments,
         "max_turns": 100, "max_text_chars": 8000,
+        "blackboard": True, "tasks": True, "interrupt_previous": True,
     }
 
 
@@ -55,6 +60,31 @@ async def get_session(session_id: UUID, kernel: Kernel):
 @router.post("/sessions/{session_id}/turns", response_model=TurnAccepted, status_code=202)
 async def turn(session_id: UUID, request: TurnRequest, kernel: Kernel):
     return await kernel.submit(str(session_id), request)
+
+
+@router.post("/sessions/{session_id}/tasks")
+async def update_task(session_id: UUID, request: TaskRequest, kernel: Kernel):
+    return await kernel.update_task(str(session_id), request)
+
+
+@router.get("/sessions/{session_id}/tasks")
+async def list_tasks(session_id: UUID, kernel: Kernel):
+    return await kernel.list_tasks(str(session_id))
+
+
+@router.post("/sessions/{session_id}/records")
+async def update_record(session_id: UUID, request: RecordRequest, kernel: Kernel):
+    return await kernel.update_record(str(session_id), request)
+
+
+@router.get("/sessions/{session_id}/records")
+async def list_records(session_id: UUID, kernel: Kernel, task_id: TaskId | None = None):
+    return await kernel.list_records(str(session_id), task_id)
+
+
+@router.post("/sessions/{session_id}/background/cancel")
+async def cancel_background(session_id: UUID, request: BackgroundCancelRequest, kernel: Kernel):
+    return await kernel.cancel_background(str(session_id), request)
 
 
 @router.post("/sessions/{session_id}/interrupt")
@@ -77,8 +107,8 @@ async def trace(session_id: UUID, kernel: Kernel):
     state = await kernel.repo.get(str(session_id))
     return {
         "session_id": str(session_id), "last_seq": state["last_seq"],
-        "agents": [{key: run[key] for key in (
-            "run_id", "agent_id", "turn_id", "generation", "input_revision", "status"
+        "agents": [{key: run.get(key) for key in (
+            "run_id", "agent_id", "turn_id", "generation", "input_revision", "status", "task_id"
         )} for run in state["runs"].values()],
         "responses": [{"response_id": response["response_id"], "status": response["status"],
             "segments": [{key: segment[key] for key in (

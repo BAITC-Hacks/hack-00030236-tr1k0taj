@@ -161,9 +161,27 @@ just up
 Проверки без Docker: `just db-local`, `just migrate-local`, `just test-local`,
 `just smoke-local`. Для другой тестовой БД передайте `DATABASE_URL`; не используйте
 старую экспериментальную базу с `0002_agent_kernel` для новой цепочки миграций.
-Поиск сейчас имеет собственный public-document индекс и lexical fallback;
-расширения ru/kk, kit_variants и embedding_cache из неопубликованной ветки коллеги
-остаются отдельной интеграцией. English `search_query` и top-3 уже есть в контракте.
+Поиск использует public-document индекс, ru/kk-расширения, кэш эмбеддингов и lexical fallback.
+Агенты передают English `search_query`; RAG сохраняет top-3 и provenance источников (PR #14).
+
+### Blackboard v2
+
+План, контракты и ограничения: [blackboard-v2](docs/specs/blackboard-v2.md).
+Задачи имеют собственные версии записей и фоновые запуски; исправление ключа отзывает
+зависимые выводы. В `AgentSpec.reads` можно указать только нужные ключи: такой агент
+получает выбранные записи без посторонней истории. Дефолт `['$message']` читает разговор.
+Главный подхватывает свежие результаты между сегментами текущего ответа.
+
+- `POST /sessions/{id}/tasks` — создать задачу, поставить на паузу, возобновить или отменить.
+- `POST /sessions/{id}/records` — исправить факт; `expected_record_id` защищает от перезаписи.
+- `POST /sessions/{id}/background/cancel` — остановить фон, сохранив основной ответ.
+- `/turns` принимает `task_id`, `updates` и `interrupt_previous`.
+- `/calls` принимает `request_id`; `GET /calls/{id}/events?after=…` воспроизводит сохранённый поток.
+
+История едина для kernel, router и передачи оператору; без ACK доставка остаётся `unknown`.
+Повтор одного `request_id` с другим телом возвращает 409. Task/update-команды передаёт
+интегратор явно. Запуск — один backend worker; автоматическое восстановление вычислений
+после рестарта и production-авторизация в эту поставку не входят.
 
 ### Поиск по KB на казахском
 

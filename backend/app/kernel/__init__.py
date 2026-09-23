@@ -6,13 +6,33 @@ from app.kernel.runtime import Runtime
 from app.kernel.store import KernelError, Repository
 from app.kernel.types import (
     AgentSpec,
+    BackgroundCancelRequest,
+    BlackboardReadArgs,
     CreateSession,
     InterruptRequest,
     PlaybackRequest,
+    RecordRequest,
+    RecordUpdate,
     SegmentTiming,
+    TaskRequest,
     TurnRequest,
 )
 
-__all__ = ["AgentSpec", "CreateSession", "InterruptRequest", "KernelError", "ModelDriver",
-           "PlaybackRequest", "Repository", "Runtime", "SegmentTiming", "TurnRequest",
-           "api_router"]
+__all__ = [
+    "AgentSpec",
+    "BackgroundCancelRequest",
+    "BlackboardReadArgs",
+    "CreateSession",
+    "InterruptRequest",
+    "KernelError",
+    "ModelDriver",
+    "PlaybackRequest",
+    "RecordRequest",
+    "RecordUpdate",
+    "Repository",
+    "Runtime",
+    "SegmentTiming",
+    "TaskRequest",
+    "TurnRequest",
+    "api_router",
+]

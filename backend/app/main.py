@@ -35,6 +35,7 @@ async def lifespan(application: FastAPI):
     try:
         yield
     finally:
+        await application.state.calls.shutdown()
         await kernel.shutdown()
         await stop_reindex_knowledge()
         await tracer.stop_persistence()  # до engine.dispose(): досбросить очередь span'ов

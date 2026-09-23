@@ -10,6 +10,8 @@ from app.router import Alternative, ScenarioPick
 
 class _Event(BaseModel):
     turn_id: int = Field(description="0, если ход ещё не зарегистрирован (ошибка STT)")
+    request_id: str | None = None
+    event_seq: int | None = None
 
 
 class TranscriptEvent(_Event):

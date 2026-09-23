@@ -6,6 +6,7 @@
 
 import asyncio
 import base64
+import hashlib
 import itertools
 import json
 import time
@@ -13,6 +14,7 @@ from collections import Counter, defaultdict
 from collections.abc import AsyncIterator, Iterator
 from contextlib import aclosing, contextmanager, suppress
 from typing import Any
+from uuid import uuid4
 
 import anyio
 from opentelemetry import trace
@@ -33,9 +35,11 @@ from app.call.events import (
     TurnDoneEvent,
     TurnStartedEvent,
 )
+from app.call.journal import TERMINAL, CallJournal, fingerprint
 from app.call.ports import Providers
 from app.context import Contexts, SessionContext, SessionNotFound, router_view
 from app.executor import Execution, ReplyBrief, TurnInput, reply_language
+from app.kernel import KernelError, RecordUpdate
 from app.knowledge import open_knowledge
 from app.router import Decision, RouterOutput, RouterResult, UnknownScenario, decide
 from app.speech import ProviderUnavailable, Transcript, split_sentences
@@ -73,6 +77,13 @@ class CallService:
         self._locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self.last_router: dict[str, RouterResult] = {}
         self._opening = asyncio.Lock()
+        self.journal = CallJournal(contexts)
+        self._ingress_locks = defaultdict(asyncio.Lock)
+        self._signals = defaultdict(asyncio.Event)
+        self._producers: dict[tuple[str, str], asyncio.Task] = {}
+        self._active_requests: dict[str, str] = {}
+        self._request_turns: dict[tuple[str, str], int] = {}
+        self._cancelled_requests: set[tuple[str, str]] = set()
 
     async def ensure_call(self, session_id: str) -> tuple[SessionContext, bool]:
         """Сессия по UUID с фронта: вернуть существующую или открыть новый звонок."""
@@ -83,7 +94,9 @@ class CallService:
                 return await self.contexts.start_call(session_id), True
 
     def busy(self, session_id: str) -> bool:
-        return self._locks[session_id].locked()
+        rid = self._active_requests.get(session_id)
+        task = self._producers.get((session_id, rid))
+        return self._locks[session_id].locked() or (task is not None and not task.done())
 
     async def cancel_turn(self, session_id: str, turn_id: int, played_ms: int | None = None):
         await self.contexts.cancel_turn(session_id, turn_id)
@@ -91,6 +104,165 @@ class CallService:
             await self.kernel.interrupt_turn(session_id, turn_id, played_ms)
         if task := self._speech_tasks.get((session_id, turn_id)):
             task.cancel()
+        rid = self._active_requests.get(session_id)
+        task = self._producers.get((session_id, rid))
+        if (task is not None and task is not asyncio.current_task()
+                and self._request_turns.get((session_id, rid)) == turn_id):
+            task.cancel()
+
+    async def _recover_requests(self, sid):
+        generation, journal = await self.journal.state(sid)
+        for rid, record in journal.get("requests", {}).items():
+            task = self._producers.get((sid, rid))
+            if (record["generation"] == generation and record["status"] == "running"
+                    and (task is None or task.done())):
+                await self.journal.append(sid, rid, ErrorEvent(
+                    turn_id=record["turn_id"], stage="turn", code="request_interrupted",
+                    message="Обработка запроса завершилась до получения полного ответа.", fatal=True,
+                ).model_dump(mode="json"))
+                self._signals[sid].set()
+
+    async def ingress(
+        self, sid, *, request_id=None, text=None, audio=None, mime="audio/webm",
+        language_hint=None, task_id="default", updates=None, interrupt_previous=False,
+    ):
+        """Reserve once before the HTTP stream starts; retries subscribe to saved output."""
+        rid = str(request_id or uuid4())
+        updates = [item.model_dump(mode="json", exclude_unset=True)
+                   if isinstance(item, BaseModel) else item
+                   for item in (updates or [])]
+        payload = {"text": text, "language_hint": language_hint, "task_id": task_id,
+                   "updates": updates, "interrupt_previous": interrupt_previous}
+        if audio is not None:
+            payload.update(text=None, audio_sha256=hashlib.sha256(audio).hexdigest(), mime=mime)
+        digest = fingerprint(payload)
+        async with self._ingress_locks[sid]:
+            await self.ensure_call(sid)
+            await self._recover_requests(sid)
+            if await self.journal.lookup(sid, rid, digest) is not None:
+                return rid, False
+            if self.busy(sid):
+                if not interrupt_previous:
+                    raise KernelError("turn_in_progress", "Предыдущий ход ещё идёт")
+                previous = self._active_requests.get(sid)
+                previous_task = self._producers.get((sid, previous))
+                previous_turn = self._request_turns.get((sid, previous), 0)
+                if previous_turn:
+                    await self.cancel_turn(sid, previous_turn)
+                if previous_task is None:
+                    raise KernelError("turn_in_progress", "Предыдущий ход ещё завершается")
+                stopped = await self._cancel_request(sid, previous)
+                if not stopped or self._locks[sid].locked():
+                    raise KernelError("turn_in_progress", "Предыдущий ход ещё завершается")
+            await self.journal.begin(sid, rid, digest)
+            self._active_requests[sid] = rid
+            self._producers[(sid, rid)] = asyncio.create_task(self._produce(
+                sid, rid, text=text, audio=audio, mime=mime, language_hint=language_hint,
+                task_id=task_id, updates=updates, interrupt_previous=interrupt_previous,
+            ))
+        return rid, True
+
+    async def _cancel_request(self, sid, rid):
+        self._cancelled_requests.add((sid, rid))
+        task = self._producers.get((sid, rid))
+        if turn_id := self._request_turns.get((sid, rid), 0):
+            await self.cancel_turn(sid, turn_id)
+        if task is not None and not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError, TimeoutError):
+                await asyncio.wait_for(asyncio.shield(task), timeout=1)
+        record = await self.journal.lookup(sid, rid)
+        if record is not None and record["status"] == "running":
+            # A task cancelled before its first instruction cannot execute its own finally block.
+            await self.journal.append(sid, rid, TurnCancelledEvent(
+                turn_id=record["turn_id"],
+            ).model_dump(mode="json"))
+            self._signals[sid].set()
+        return task is None or task.done()
+
+    async def shutdown(self):
+        for sid, rid in list(self._producers):
+            with suppress(KernelError):
+                await self._cancel_request(sid, rid)
+
+    async def _produce(self, sid, rid, **kwargs):
+        status = "cancelled"
+        try:
+            async with aclosing(self.run_turn(sid, request_id=rid, **kwargs)) as stream:
+                async for item in stream:
+                    self._request_turns[(sid, rid)] = item.turn_id
+                    if (sid, rid) in self._cancelled_requests:
+                        if item.turn_id:
+                            await self.cancel_turn(sid, item.turn_id)
+                        break
+                    await self.journal.append(sid, rid, item.model_dump(mode="json"))
+                    self._signals[sid].set()
+                    if item.type == "turn.done":
+                        status = "completed"
+                    elif item.type == "error" and item.fatal:
+                        status = "failed"
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:  # noqa: BLE001 — never persist provider internals in public replay
+            status = "failed"
+            with anyio.CancelScope(shield=True):
+                await self.journal.append(sid, rid, ErrorEvent(
+                    turn_id=self._request_turns.get((sid, rid), 0), stage="turn",
+                    code=exc.code if isinstance(exc, KernelError) else "call_failed",
+                    message="Не удалось завершить ход. Отправьте новую реплику.", fatal=True,
+                ).model_dump(mode="json"))
+        finally:
+            with anyio.CancelScope(shield=True):
+                if status == "cancelled":
+                    await self.journal.append(sid, rid, TurnCancelledEvent(
+                        turn_id=self._request_turns.get((sid, rid), 0),
+                    ).model_dump(mode="json"))
+                await self.journal.finish(sid, rid, status)
+                self._signals[sid].set()
+
+    async def replay(self, sid, *, after=0, request_id=None, cancel_on_disconnect=False):
+        """Finite once the selected requests finish; reconnect never starts a provider."""
+        cursor, finished = after, False
+        try:
+            while True:
+                self._signals[sid].clear()
+                batch = await self.journal.events(sid, cursor, request_id=request_id)
+                for item in batch:
+                    cursor = item["event_seq"]
+                    yield item
+                if len(batch) == 200:
+                    continue
+                generation, journal = await self.journal.state(sid)
+                records = [record for rid, record in journal.get("requests", {}).items()
+                           if record["generation"] == generation
+                           and (request_id is None or request_id == rid)]
+                if (all(record["status"] in TERMINAL for record in records)
+                        and all(cursor >= record["last_seq"] for record in records)):
+                    # Finish stage timing/spans before closing the HTTP span. Cancelled providers
+                    # may resist cancellation; their terminal replay must remain finite.
+                    cleanup = [task for (session, rid), task in self._producers.items()
+                               if session == sid and not task.done()
+                               and (request_id is None or request_id == rid)
+                               and journal["requests"][rid]["status"] in {"completed", "failed"}]
+                    if cleanup:
+                        await asyncio.wait(cleanup, timeout=1)
+                    finished = True
+                    return
+                try:
+                    await asyncio.wait_for(self._signals[sid].wait(), 1)
+                except TimeoutError:
+                    yield None
+        finally:
+            if not finished and cancel_on_disconnect and request_id is not None:
+                task = self._producers.get((sid, request_id))
+                if task is not None and not task.done():
+                    with anyio.CancelScope(shield=True):
+                        await self._cancel_request(sid, request_id)
+
+    async def prepare_replay(self, sid, after=0, request_id=None):
+        async with self._ingress_locks[sid]:
+            await self._recover_requests(sid)
+            await self.journal.validate_cursor(sid, after, request_id)
 
     async def run_turn(
         self,
@@ -100,6 +272,10 @@ class CallService:
         audio: bytes | None = None,
         mime: str = "audio/webm",
         language_hint: str | None = None,
+        request_id=None,
+        task_id="default",
+        updates=None,
+        interrupt_previous=False,
     ) -> AsyncIterator[BaseModel]:
         lock = self._locks[session_id]
         if lock.locked():  # API проверяет это заранее (409); здесь — защита от гонки
@@ -108,7 +284,9 @@ class CallService:
             )
             return
         async with lock:
-            turn = _Turn(self, session_id, audio is not None, language_hint)
+            turn = _Turn(self, session_id, audio is not None, language_hint,
+                         request_id=request_id, task_id=task_id, updates=updates,
+                         interrupt_previous=interrupt_previous)
             try:
                 async for event in turn.run(text, audio, mime, language_hint):
                     turn.observe(event)
@@ -127,7 +305,8 @@ class _Turn:
     """Состояние одного хода: тайминги и то, что пойдёт в trace."""
 
     def __init__(
-        self, svc: CallService, session_id: str, is_audio: bool = False, hint: str | None = None
+        self, svc: CallService, session_id: str, is_audio: bool = False, hint: str | None = None,
+        *, request_id=None, task_id="default", updates=None, interrupt_previous=False,
     ) -> None:
         self.svc = svc
         self.p = svc.providers
@@ -142,6 +321,10 @@ class _Turn:
         self.router_rr: RouterResult | None = None
         self.decision: Decision | None = None
         self.actions: list[str] = []
+        self.request_id = request_id
+        self.task_id = task_id
+        self.updates = list(updates or [])
+        self.interrupt_previous = interrupt_previous
         # Span хода открыт явно (не current): генератор отдаёт события через yield, и контекст
         # OTel не должен «висеть» между кусками SSE. Этапы делают его текущим только внутри
         # блоков без yield (_child), задачи ответа получают его копией контекста при создании.
@@ -204,8 +387,8 @@ class _Turn:
                     tr = await self.p.stt.transcribe(audio, mime, hint)
                 except ProviderUnavailable as e:
                     failure = (e.code, e.message)
-                except Exception as e:  # noqa: BLE001 — ошибка провайдера не роняет звонок
-                    failure = ("stt_failed", str(e))
+                except Exception:  # noqa: BLE001 — ошибка провайдера не роняет звонок
+                    failure = ("stt_failed", "Не удалось распознать аудио. Попробуйте текстовый ввод.")
                 if failure:
                     _fail(s, "stt", *failure)
                 else:
@@ -223,6 +406,8 @@ class _Turn:
             tr = Transcript(text=text or "", language=hint)
             source = "text"
 
+        async with self.ctx.mutate(self.sid, author="system") as mutation:
+            mutation.focus_task(self.task_id)
         self.turn_id = await self.ctx.begin_turn(self.sid, tr.text, tr.language)
         snap = await self.ctx.snapshot(self.sid)
         self.span.set_attributes({
@@ -261,8 +446,8 @@ class _Turn:
                         failure = (e.code, e.message, e.message)
                     except UnknownScenario as e:
                         failure = ("router_invalid", str(e), "Не удалось надёжно определить запрос.")
-                    except Exception as e:  # noqa: BLE001
-                        failure = ("router_failed", str(e), "Сервис временно недоступен.")
+                    except Exception:  # noqa: BLE001
+                        failure = ("router_failed", "Не удалось определить запрос.", "Сервис временно недоступен.")
                     self.latency.router = self._stage("router", t)
                     if failure:
                         _fail(s, "router", failure[0], failure[1])
@@ -302,7 +487,7 @@ class _Turn:
                         else:
                             self._trace_execution(s, execution)
                     if exec_error is not None:
-                        yield await self._error("executor", "executor_failed", exec_error)
+                        yield await self._error("executor", "executor_failed", "Не удалось выполнить запрос.")
                     self.latency.reads = self._stage("reads", t)
 
                 self._alive()
@@ -325,6 +510,21 @@ class _Turn:
                 and execution.brief.handoff is None
                 and all(action.mode == "read" for action in execution.actions)
             )
+            # Explicit integration updates win over extraction; never re-publish stale saved slots.
+            explicit_keys = {item["key"] for item in self.updates}
+            for key, value in (self.router_out.slots if self.router_out else {}).items():
+                if value is not None and key not in explicit_keys:
+                    self.updates.append(RecordUpdate(
+                        key=key, value=value, task_id=self.task_id, source="user",
+                        source_id=f"call:{self.sid}:{self.turn_id}",
+                    ).model_dump(mode="json"))
+            if len(self.updates) > 32:
+                raise KernelError("input_update_limit", "Слишком много обновлений за одну реплику", 422)
+            if self.svc.kernel is not None and not use_kernel:
+                await self.svc.kernel.update_inputs(
+                    self.sid, request_id=self.request_id or uuid4(), task_id=self.task_id,
+                    updates=self.updates, text=tr.text, turn_id=self.turn_id,
+                )
             # факты хода зафиксированы как vN — фон стартует от этого снимка (ADR 0006)
             if not use_kernel:
                 self.p.background.schedule(await self.ctx.snapshot(self.sid), self.turn_id)
@@ -494,7 +694,9 @@ class _Turn:
             }
             completed = False
             async for envelope in self.svc.kernel.stream_turn(
-                self.sid, self.turn_id, transcript, context
+                self.sid, self.turn_id, transcript, context,
+                request_id=self.request_id, task_id=self.task_id, updates=self.updates,
+                interrupt_previous=self.interrupt_previous,
             ):
                 self._alive()
                 kind, payload = envelope["type"], envelope.get("payload", {})
@@ -560,7 +762,7 @@ class _Turn:
                         ts.set_attributes({"audio.mime": chunk.mime, "audio.bytes": len(chunk.data)}
                                           if chunk is not None else {"tts.skipped": True})
                 if isinstance(chunk, Exception):
-                    await out.put(await self._error("tts", "tts_failed", str(chunk)))
+                    await out.put(await self._error("tts", "tts_failed", "Не удалось озвучить часть ответа."))
                     continue
                 if chunk is None:
                     continue

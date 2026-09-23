@@ -53,7 +53,7 @@ class RuntimeOwner(Protocol):
 
 Context знает только контракт журнала: ключ курсора `last_seq` в слоте (монотонен через поколения),
 `payload.seq` и `payload.visibility` (`public` видно на `/board` и в публичном replay).
-Context **не знает**: статусы, сообщения, ответы, агентов, envelope-поля (`turn_id`, `input_revision`...),
+Хранилище Contexts **не интерпретирует** статусы, сообщения, ответы, агентов, envelope-поля (`turn_id`, `input_revision`...),
 события `session.created/closed`. Context не импортирует `app.kernel`.
 
 API: `runtime_create(sid, spec)`, `runtime_get`, `runtime_change(sid, apply, *, durable=True)`,
@@ -65,12 +65,48 @@ API: `runtime_create(sid, spec)`, `runtime_get`, `runtime_change(sid, apply, *, 
 Снимок пишет следующая durable-запись (`segment.completed`, любой `mutate`, close).
 Было: N upsert'ов `sessions.state` на N токенов; стало: 0 (тест `test_context_journal.py`).
 Компромисс: после падения посреди сегмента текст последнего сегмента в снимке отстаёт от журнала
-(восстанавливается из `response.delta`), а курсор при загрузке берётся как
+(дельты доступны через replay), а курсор при загрузке берётся как
 `max(snapshot.last_seq, max(seq) журнала)` — `seq` остаётся уникальным. `Runtime.recover`
 закрывает открытые сессии durable-записью.
 
 TODO(hack): имя слота `kernel` и тип строк `"kernel"` — унаследованный формат хранения;
 переименование потребует миграции.
+
+### Blackboard v2 и единая история
+
+Публичные `ensure_blackboard`, `update_task`, `put_record`, `select_records`,
+`input_versions`, `fingerprint_matches` работают над kernel projection в памяти;
+их изменения и внутренние события сохраняются через `Contexts.kernel_change`.
+`schema_version=2` отделена от монотонной версии доски. Задачи и записи имеют собственные
+версии; текущая запись выбирается по паре scope/key, старые остаются с `supersedes`.
+Зависимости указывают конкретные record IDs. Исправление отзывает зависимые выводы,
+expiry исключает запись при чтении, не удаляя журнал. Fingerprint включает отсутствующие
+ключи; `$message` всегда относится к выбранной задаче. Paused сохраняет знания,
+но не допускает свежие запуски; completed/cancelled записи не входят в активный контекст.
+Лимиты: 32 задачи, 2000 записей, 16000 символов JSON значения, 32 зависимости записи.
+
+`conversation_history(SessionContext)` объединяет domain и kernel реплики по turn/role;
+kernel-сегменты сохраняют interrupted и delivery, шаблонные ответы имеют unknown без ACK.
+Её используют router/handoff и read-only поле `conversation_history` в `kernel.Repository.get`.
+Репозиторий формирует историю из одного атомарного `Contexts.snapshot`; сам `Contexts`
+хранит непрозрачный runtime slot и не добавляет в него blackboard или проекции истории.
+`kernel_history(kernel_state)` и `delivery(segment,response)` экспортируются тем же фасадом;
+data-модуль не импортирует kernel. Текст сегмента не режется по пропорции аудиовремени.
+
+Потоковые дельты сохраняются в журнал без перезаписи JSONB snapshot. После аварийного
+завершения процесса до следующего durable checkpoint последние дельты доступны в replay,
+но canonical history восстанавливается из последнего snapshot и может их ещё не содержать.
+Автоматическое восстановление незавершённого сегмента из журнала в этой версии не выполняется.
+
+Приватный `SessionContext.call_journal` сохраняет ingress idempotency ledger между reset,
+но не попадает в `/context`. Публичные call stream events пишет владеющий ими модуль call.
+
+`Mutation.focus_task(task_id)` до регистрации реплики переключает доменную задачу:
+active_scenario, pending_topics, slots_by_topic, pending_confirmation, facts и
+low_confidence_streak сохраняются отдельно (до 32 задач). Приватный `task_states`
+сохраняется в JSONB и очищается при reset. Идентификация клиента, язык и общий журнал
+реплик остаются на уровне разговора; `Turn.task_id` фиксируется при записи. `router_view`
+выбирает только историю и доменные сведения текущей задачи (`domain_task_id`).
 
 Типы `Fact`, `BoardEntry`, `ContextPatch` принадлежат `context`. `add_facts` и `ContextPatch` принимают и `knowledge.Fact` (те же поля).
 
