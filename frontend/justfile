@@ -1,0 +1,14 @@
+# Frontend-only development; the full project still starts with root `just up`.
+set windows-shell := ["cmd.exe", "/c"]
+
+dev port="3000":
+    npm run dev -- --hostname 0.0.0.0 --port {{port}}
+
+check:
+    npx tsc --noEmit
+
+lint:
+    npm run lint
+
+build:
+    npm run build
