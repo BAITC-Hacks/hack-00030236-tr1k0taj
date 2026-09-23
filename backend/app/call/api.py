@@ -3,20 +3,32 @@
 Спека: docs/specs/call-api.md. Контекст и доска для панели — /sessions/* (модуль context).
 """
 
-from collections.abc import AsyncIterable
+import json
+from contextlib import aclosing
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Path, Request, Response, UploadFile
-from fastapi.sse import EventSourceResponse, ServerSentEvent
+from fastapi import (
+    APIRouter,
+    Depends,
+    Form,
+    Header,
+    HTTPException,
+    Path,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+)
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 
-from app.call.events import TurnEvent
 from app.call.ports import Providers
 from app.call.service import CallService
 from app.config import DATASET_TODAY
 from app.context import SessionContext, SessionNotFound
 from app.docs import SSE_EXAMPLE
+from app.kernel import KernelError, TurnRequest
 from app.router import RouterResult
 
 MAX_AUDIO_BYTES = 10 * 1024 * 1024
@@ -60,7 +72,7 @@ def _not_busy(sid: str, calls: CallService) -> str:
 
 async def turn_session(session_id: SessionId, calls: Calls) -> str:
     """Ход по UUID с фронта: незнакомая сессия открывается сама (первый ход или рестарт backend)."""
-    sid = _not_busy(str(session_id), calls)
+    sid = str(session_id)
     await calls.ensure_call(sid)
     return sid
 
@@ -120,7 +132,8 @@ class CallStarted(BaseModel):
     capabilities: Capabilities
 
 
-class TextTurn(BaseModel):
+class TextTurn(TurnRequest):
+    request_id: UUID | None = None
     text: str = Field(
         min_length=1, max_length=2000, examples=["Что с моим заявлением по затоплению?"]
     )
@@ -130,6 +143,7 @@ class TextTurn(BaseModel):
 
 
 class AudioTurn(BaseModel):
+    request_id: UUID | None = None
     audio: UploadFile = Field(description="Запись push-to-talk: webm/ogg/wav, до 10 МБ")
     language_hint: Literal["ru", "kk"] | None = Field(
         None, description="Подсказка языка; роутер всё равно определяет язык сам"
@@ -244,23 +258,25 @@ async def reset_call(session_id: SessionId, calls: Calls) -> SessionContext:
 
 @router.post(
     "/calls/{session_id}/turns/text",
-    response_class=EventSourceResponse,
+    response_class=StreamingResponse,
     summary="Реплика текстом → поток событий",
     description="Резервный канал ввода (спека 2.1). " + SSE_DOC,
     responses=TURN_ERRORS,
 )
 async def text_turn(
     session_id: TurnSession, body: TextTurn, calls: Calls
-) -> AsyncIterable[TurnEvent]:
-    async for e in calls.run_turn(
-        session_id, text=body.text.strip(), language_hint=body.language_hint
-    ):
-        yield ServerSentEvent(event=e.type, data=e)
+) -> StreamingResponse:
+    request_id, is_new = await calls.ingress(
+        session_id, text=body.text, language_hint=body.language_hint,
+        request_id=body.request_id, task_id=body.task_id, updates=body.updates,
+        interrupt_previous=body.interrupt_previous,
+    )
+    return _stream_response(calls, session_id, request_id, cancel_on_disconnect=is_new)
 
 
 @router.post(
     "/calls/{session_id}/turns/audio",
-    response_class=EventSourceResponse,
+    response_class=StreamingResponse,
     summary="Реплика голосом → поток событий",
     description="multipart/form-data: `audio` (webm/ogg/wav, до 10 МБ) и `language_hint`. "
     + SSE_DOC,
@@ -270,20 +286,59 @@ async def audio_turn(
     session_id: TurnSession,
     calls: Calls,
     form: Annotated[AudioTurn, Form(media_type="multipart/form-data")],
-) -> AsyncIterable[TurnEvent]:
+) -> StreamingResponse:
     audio = form.audio
     data = await audio.read()
     if not data:
         raise HTTPException(422, "empty audio")
     if len(data) > MAX_AUDIO_BYTES:
         raise HTTPException(413, "audio too large")
-    async for e in calls.run_turn(
+    request_id, is_new = await calls.ingress(
         session_id,
         audio=data,
         mime=audio.content_type or "audio/webm",
         language_hint=form.language_hint,
-    ):
-        yield ServerSentEvent(event=e.type, data=e)
+        request_id=form.request_id,
+    )
+    return _stream_response(calls, session_id, request_id, cancel_on_disconnect=is_new)
+
+
+def _stream_response(calls, sid, request_id=None, *, after=0, cancel_on_disconnect=False):
+    async def stream():
+        async with aclosing(calls.replay(
+            sid, after=after, request_id=request_id, cancel_on_disconnect=cancel_on_disconnect,
+        )) as events:
+            async for envelope in events:
+                if envelope is None:
+                    yield ": keep-alive\n\n"
+                else:
+                    yield (f"id: {envelope['event_seq']}\nevent: {envelope['type']}\n"
+                           f"data: {json.dumps(envelope, ensure_ascii=False)}\n\n")
+
+    headers = {"X-Request-ID": request_id} if request_id is not None else {}
+    headers.update({"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    return StreamingResponse(stream(), media_type="text/event-stream", headers=headers)
+
+
+@router.get("/calls/{session_id}/events", response_class=StreamingResponse,
+            summary="Продолжить чтение сохранённого публичного потока звонка")
+async def replay_events(
+    session_id: Session, calls: Calls,
+    after: Annotated[int, Query(ge=0)] = 0,
+    request_id: UUID | None = None,
+    last_event_id: Annotated[str | None, Header()] = None,
+) -> StreamingResponse:
+    if last_event_id is not None:
+        try:
+            header_cursor = int(last_event_id)
+        except ValueError as exc:
+            raise KernelError("invalid_cursor", "Last-Event-ID должен быть числом", 422) from exc
+        if header_cursor < 0:
+            raise KernelError("invalid_cursor", "Курсор не может быть отрицательным", 422)
+        after = max(after, header_cursor)
+    rid = str(request_id) if request_id is not None else None
+    await calls.prepare_replay(session_id, after, rid)
+    return _stream_response(calls, session_id, rid, after=after)
 
 
 @router.post(

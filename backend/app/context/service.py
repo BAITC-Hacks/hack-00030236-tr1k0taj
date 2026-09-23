@@ -12,6 +12,8 @@ from contextlib import asynccontextmanager
 from copy import deepcopy
 from typing import Any
 
+from app.context.blackboard import ensure_blackboard
+from app.context.history import conversation_history
 from app.context.kernel import append_kernel, new_kernel, reset_kernel
 from app.context.mutation import Mutation
 from app.context.store import ContextStore
@@ -26,6 +28,13 @@ from app.context.types import (
 )
 
 ResetHook = Callable[[str, int], Any]  # (session_id, new_generation)
+
+
+def _kernel_snapshot(state: SessionContext) -> dict:
+    result = deepcopy(state.kernel)
+    ensure_blackboard(result)
+    result["conversation_history"] = conversation_history(state)
+    return result
 
 
 class Contexts:
@@ -222,7 +231,7 @@ class Contexts:
             current = self._states.get(session_id) or await self._store.load(session_id)
             if current is not None and current.kernel.get("status") == "open":
                 self._states[session_id] = current
-                return deepcopy(current.kernel)
+                return _kernel_snapshot(current)
             state = current.model_copy(deep=True) if current else SessionContext(session_id=session_id)
             entries = []
             if state.kernel.get("status") == "closed" and state.kernel.get("messages"):
@@ -241,7 +250,7 @@ class Contexts:
             }])
             await self._store.save(state, entries + created)
             self._states[session_id] = state
-            result = deepcopy(state.kernel)
+            result = _kernel_snapshot(state)
         if did_reset:
             for hook in self._reset_hooks:
                 hook(session_id, state.generation)
@@ -252,7 +261,7 @@ class Contexts:
             state = await self._load_locked(session_id)
             if not state.kernel:
                 raise SessionNotFound(session_id)
-            return deepcopy(state.kernel)
+            return _kernel_snapshot(state)
 
     async def kernel_change(self, session_id: str, apply: Callable) -> tuple[Any, list[dict]]:
         """Pure synchronous mutation + event append, committed under the shared context lock."""
@@ -261,6 +270,7 @@ class Contexts:
             if not current.kernel:
                 raise SessionNotFound(session_id)
             state = current.model_copy(deep=True)
+            ensure_blackboard(state.kernel)
             sequence = state.kernel["last_seq"]
             result, pending = apply(state.kernel, sequence)
             if state.kernel["generation"] != state.generation:

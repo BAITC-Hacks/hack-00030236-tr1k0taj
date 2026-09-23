@@ -70,6 +70,7 @@ class PgStore:
 
         state = ctx.model_dump(mode="json")
         state["kernel"] = deepcopy(ctx.kernel)
+        state["call_journal"] = deepcopy(ctx.call_journal)
         async with self._sf() as db, db.begin():
             stmt = insert(SessionRow).values(
                 session_id=ctx.session_id,

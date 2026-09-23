@@ -39,6 +39,28 @@ Agent kernel использует те же `sessions`/`board_entries`, без �
 Reset очищает projection, повышает generation и сохраняет монотонность курсора.
 История bot сама по себе не подтверждает доставку: playback определяется только ACK ядра.
 
+### Blackboard v2 и единая история
+
+Публичные `ensure_blackboard`, `update_task`, `put_record`, `select_records`,
+`input_versions`, `fingerprint_matches` работают над kernel projection в памяти;
+их изменения и внутренние события сохраняются через `Contexts.kernel_change`.
+`schema_version=2` отделена от монотонной версии доски. Задачи и записи имеют собственные
+версии; текущая запись выбирается по паре scope/key, старые остаются с `supersedes`.
+Зависимости указывают конкретные record IDs. Исправление отзывает зависимые выводы,
+expiry исключает запись при чтении, не удаляя журнал. Fingerprint включает отсутствующие
+ключи; `$message` всегда относится к выбранной задаче. Paused сохраняет знания,
+но не допускает свежие запуски; completed/cancelled записи не входят в активный контекст.
+Лимиты: 32 задачи, 2000 записей, 16000 символов JSON значения, 32 зависимости записи.
+
+`conversation_history(SessionContext)` объединяет domain и kernel реплики по turn/role;
+kernel-сегменты сохраняют interrupted и delivery, шаблонные ответы имеют unknown без ACK.
+Её используют router/handoff и read-only поле `conversation_history` в `kernel_get`.
+`kernel_history(kernel_state)` и `delivery(segment,response)` экспортируются тем же фасадом;
+data-модуль не импортирует kernel. Текст сегмента не режется по пропорции аудиовремени.
+
+Приватный `SessionContext.call_journal` сохраняет ingress idempotency ledger между reset,
+но не попадает в `/context`. Публичные call stream events пишет владеющий ими модуль call.
+
 Типы `Fact`, `BoardEntry`, `ContextPatch` принадлежат `context`. `add_facts` и `ContextPatch` принимают и `knowledge.Fact` (те же поля).
 
 ## Публичный API

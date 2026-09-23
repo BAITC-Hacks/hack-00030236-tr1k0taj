@@ -5,11 +5,12 @@ from datetime import UTC, datetime
 from time import time_ns
 from uuid import uuid4
 
+from app.context.blackboard import ensure_blackboard
 from app.context.types import BoardEntry, SessionContext
 
 
 def new_kernel(state: SessionContext, agents: list, context: dict, mode: str) -> dict:
-    return {
+    kernel = {
         "session_id": state.session_id,
         "generation": state.generation,
         "input_revision": 0,
@@ -26,6 +27,8 @@ def new_kernel(state: SessionContext, agents: list, context: dict, mode: str) ->
         "requests": {},
         "last_seq": state.kernel.get("last_seq", 0),
     }
+    ensure_blackboard(kernel)
+    return kernel
 
 
 def append_kernel(state: SessionContext, pending: list[dict]) -> tuple[list[dict], list[BoardEntry]]:

@@ -5,6 +5,7 @@
 """
 
 import time
+from copy import deepcopy
 from typing import Any
 
 from app.context.types import (
@@ -104,6 +105,7 @@ class Mutation:
             turn_id=old.turn_id,
             language=old.language,
             history=keep,
+            call_journal=deepcopy(old.call_journal),
         )
         self._new_facts.clear()
         self.reset_happened = True

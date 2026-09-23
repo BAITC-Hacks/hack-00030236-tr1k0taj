@@ -17,10 +17,20 @@ class AgentSpec(Contract):
         default_factory=lambda: ["user.message"]
     )
     depends_on: list[str] = Field(default_factory=list, max_length=8)
-    tools: list[Literal["rag_search", "rag_read"]] = Field(
-        default_factory=lambda: ["rag_search", "rag_read"]
+    tools: list[Literal["rag_search", "rag_read", "blackboard_read"]] = Field(
+        default_factory=lambda: ["rag_search", "rag_read", "blackboard_read"]
     )
+    reads: list[str] = Field(default_factory=lambda: ["$message"], min_length=1, max_length=32)
     timeout_seconds: float = Field(default=20, ge=1, le=60)
+
+    @model_validator(mode="after")
+    def valid_reads(self):
+        if any(not key.strip() or len(key) > 128 for key in self.reads):
+            raise ValueError("reads must contain 1..128 character keys")
+        self.reads = list(dict.fromkeys(self.reads))
+        if len(set(self.reads) | {f"agent:{parent}" for parent in self.depends_on}) > 32:
+            raise ValueError("reads and agent dependencies are limited to 32 keys in total")
+        return self
 
 
 def default_agents() -> list[AgentSpec]:
@@ -77,9 +87,63 @@ class CreateSession(Contract):
         return self
 
 
+TaskId = Annotated[str, Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$")]
+
+
+class RecordUpdate(Contract):
+    key: str = Field(min_length=1, max_length=128)
+    value: Any
+    task_id: TaskId | None = None
+    source: Literal["user", "tool", "agent", "system"] = "user"
+    source_id: str | None = Field(default=None, max_length=256)
+    depends_on: list[str] = Field(default_factory=list, max_length=32)
+    expires_at: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    expected_record_id: str | None = Field(default=None, max_length=64)
+
+    @model_validator(mode="after")
+    def bounded_value(self):
+        import json
+
+        if self.key.startswith("$"):
+            raise ValueError("Keys beginning with $ are reserved")
+        if len(json.dumps(self.value, ensure_ascii=False, allow_nan=False)) > 16000:
+            raise ValueError("record value is limited to 16000 characters")
+        return self
+
+
+class TaskRequest(Contract):
+    request_id: UUID
+    task_id: TaskId
+    title: str | None = Field(default=None, min_length=1, max_length=256)
+    status: Literal["active", "paused", "completed", "cancelled"] | None = None
+    focus: bool = True
+
+
+class RecordRequest(RecordUpdate):
+    request_id: UUID
+
+
+class BackgroundCancelRequest(Contract):
+    request_id: UUID
+    task_id: TaskId | None = None
+
+
+class BlackboardReadArgs(Contract):
+    keys: list[str] = Field(default_factory=list, max_length=32)
+
+    @model_validator(mode="after")
+    def valid_keys(self):
+        if any(not key.strip() or len(key) > 128 for key in self.keys):
+            raise ValueError("keys must contain 1..128 characters")
+        return self
+
+
 class TurnRequest(Contract):
     request_id: UUID
     text: str = Field(min_length=1, max_length=8000)
+    task_id: TaskId = "default"
+    interrupt_previous: bool = False
+    updates: list[RecordUpdate] = Field(default_factory=list, max_length=32)
 
     @model_validator(mode="after")
     def not_blank(self):

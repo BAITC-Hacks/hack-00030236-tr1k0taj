@@ -72,6 +72,7 @@ class SessionContext(BaseModel):
     cancelled_turns: list[int] = []
     # Runtime projection is persisted by ContextStore, never serialized into public /context.
     kernel: dict[str, Any] = Field(default_factory=dict, exclude=True, repr=False)
+    call_journal: dict[str, Any] = Field(default_factory=dict, exclude=True, repr=False)
 
 
 class BoardEntry(BaseModel):

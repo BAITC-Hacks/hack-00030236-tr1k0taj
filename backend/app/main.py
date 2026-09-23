@@ -32,6 +32,7 @@ async def lifespan(application: FastAPI):
     try:
         yield
     finally:
+        await application.state.calls.shutdown()
         await kernel.shutdown()
         await stop_reindex_knowledge()
         await engine.dispose()
