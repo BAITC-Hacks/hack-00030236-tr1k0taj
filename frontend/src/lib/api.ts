@@ -1,9 +1,13 @@
 import type { VoiceAdapter } from "./types";
 import type { CallEvent } from "./call-contract";
-import { readSSE } from "./sse";
+import { readSSE } from "./sse.ts";
 
 export class ApiError extends Error {
-  constructor(public status: number, message = `HTTP ${status}`) { super(message); }
+  status: number;
+  constructor(status: number, message = `HTTP ${status}`) { super(message); this.status = status; }
+}
+function traceHeaders(parent?: string): Record<string, string> {
+  return parent && /^00-(?!0{32}-)[a-f0-9]{32}-(?!0{16}-)[a-f0-9]{16}-[a-f0-9]{2}$/.test(parent) ? { traceparent: parent } : {};
 }
 async function request(path: string, init?: RequestInit) {
   const response = await fetch(`/api${path}`, { cache: "no-store", ...init });
@@ -33,7 +37,7 @@ export const voiceAdapter: VoiceAdapter = {
   context: (id, signal) => json(`/sessions/${encodeURIComponent(id)}/context`, signal),
   board: (id, signal) => json(`/sessions/${encodeURIComponent(id)}/board`, signal),
   debug: (id, signal) => json(`/calls/${encodeURIComponent(id)}/router/last`, signal),
-  async stream(id, value, receive, signal) {
+  async stream(id, value, receive, signal, onTrace) {
     const audio = typeof value !== "string";
     const form = new FormData();
     if (audio) form.set("audio", value, `utterance.${value.type.includes("ogg") ? "ogg" : value.type.includes("wav") ? "wav" : "webm"}`);
@@ -41,6 +45,11 @@ export const voiceAdapter: VoiceAdapter = {
       method: "POST", signal, headers: audio ? undefined : { "Content-Type": "application/json" },
       body: audio ? form : JSON.stringify({ text: value }),
     });
+    signal.throwIfAborted();
+    const traceparent = traceHeaders(response.headers.get("traceparent") ?? undefined).traceparent;
+    const headerId = response.headers.get("x-trace-id");
+    const traceId = traceparent?.split("-")[1] ?? (headerId && /^[a-f0-9]{32}$/.test(headerId) && !/^0+$/.test(headerId) ? headerId : undefined);
+    onTrace?.({ traceId, traceparent });
     if (!response.body || !response.headers.get("content-type")?.includes("text/event-stream")) throw new Error("Expected SSE");
     let terminal = false;
     await readSSE(response.body, data => {
@@ -51,10 +60,10 @@ export const voiceAdapter: VoiceAdapter = {
     }, signal);
     if (!terminal) throw new Error("Incomplete response stream");
   },
-  async cancel(id, turnId) { await request(`/calls/${encodeURIComponent(id)}/turns/${turnId}/cancel`, { method: "POST" }); },
-  async playback(id, turnId, timing) {
+  async cancel(id, turnId, traceparent) { await request(`/calls/${encodeURIComponent(id)}/turns/${turnId}/cancel`, { method: "POST", headers: traceHeaders(traceparent) }); },
+  async playback(id, turnId, timing, traceparent) {
     await request(`/calls/${encodeURIComponent(id)}/turns/${turnId}/playback`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(timing),
+      method: "POST", headers: { "Content-Type": "application/json", ...traceHeaders(traceparent) }, body: JSON.stringify(timing),
     });
   },
 };
