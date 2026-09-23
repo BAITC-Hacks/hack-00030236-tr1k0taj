@@ -1,0 +1,235 @@
+"""HTTP звонка: сессия, ход с потоковым ответом (SSE), стоп, замер воспроизведения.
+
+Спека: docs/specs/call-api.md. Контекст и доска для панели — /sessions/* (модуль context).
+"""
+
+from collections.abc import AsyncIterable
+from typing import Annotated, Literal
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Path, Request, UploadFile
+from fastapi.sse import EventSourceResponse, ServerSentEvent
+from pydantic import BaseModel, Field
+
+from app.call.events import TurnEvent
+from app.call.ports import Providers
+from app.call.service import CallService
+from app.config import DATASET_TODAY
+from app.context import SessionContext, SessionNotFound
+from app.router import RouterResult
+
+MAX_AUDIO_BYTES = 10 * 1024 * 1024
+
+router = APIRouter(tags=["call"])
+
+
+def get_calls(request: Request) -> CallService:
+    return request.app.state.calls
+
+
+Calls = Annotated[CallService, Depends(get_calls)]
+SessionId = Annotated[str, Path(description="ID сессии из POST /calls")]
+TurnId = Annotated[int, Path(description="turn_id из события turn.started")]
+
+
+async def existing_session(session_id: SessionId, calls: Calls) -> str:
+    try:
+        await calls.contexts.snapshot(session_id)
+    except SessionNotFound:
+        raise HTTPException(404, "session not found") from None
+    return session_id
+
+
+Session = Annotated[str, Depends(existing_session)]
+
+
+async def free_session(session_id: Session, calls: Calls) -> str:
+    """Один foreground-ход на сессию (спека 7.5): пока идёт ход, новый ввод — 409."""
+    if calls.busy(session_id):
+        raise HTTPException(409, "turn_in_progress")
+    return session_id
+
+
+FreeSession = Annotated[str, Depends(free_session)]
+
+NOT_FOUND = {404: {"description": "Сессии нет (или backend перезапускался)"}}
+TURN_ERRORS = NOT_FOUND | {
+    409: {"description": "`turn_in_progress`: предыдущий ход ещё идёт"},
+    422: {"description": "Пустая реплика или аудио"},
+}
+SSE_DOC = """Ответ — поток `text/event-stream`. Каждое событие: `event: <type>` и `data: <JSON>`,
+в JSON есть `type` и `turn_id`. Типичный порядок:
+
+`transcript` → `turn.started` → `routing` → `action`* → `facts`? → `reply.delta`+ →
+`audio`* (вперемешку с `reply.delta`) → `reply.done` → `turn.done`.
+
+Ошибка этапа приходит как `error` (`fatal=false` — ход продолжается честным ответом).
+После «стопа» приходит `turn.cancelled` (если соединение ещё открыто) и больше ничего.
+Если событий долго нет, сервер шлёт комментарий-keepalive `: ping`."""
+
+
+# --- схемы ------------------------------------------------------------------
+
+
+class Capabilities(BaseModel):
+    mock_mode: bool = Field(description="true — LLM не настроен, сценарии не выбираются")
+    providers: dict[str, str] = Field(examples=[{"stt": "mock", "llm": "mock", "tts": "mock"}])
+    supported_actions: list[str] = Field(
+        description="Действия, которые исполнитель реально выполняет; остальные ведут к оператору"
+    )
+    languages: list[str] = ["ru", "kk", "mixed"]
+    audio_input: list[str] = ["audio/webm", "audio/ogg", "audio/wav"]
+    dataset_today: str
+
+
+class CallStarted(BaseModel):
+    session_id: str
+    context: SessionContext
+    capabilities: Capabilities
+
+
+class TextTurn(BaseModel):
+    text: str = Field(
+        min_length=1, max_length=2000, examples=["Что с моим заявлением по затоплению?"]
+    )
+    language_hint: Literal["ru", "kk"] | None = Field(
+        None, description="Подсказка языка; роутер всё равно определяет язык сам"
+    )
+
+
+class Playback(BaseModel):
+    eos_to_playback_ms: int = Field(
+        ge=0, description="Браузер: конец речи клиента → начало воспроизведения ответа"
+    )
+    eos_to_reply_text_ms: int | None = Field(
+        None, ge=0, description="Браузер: конец речи → появление текста ответа"
+    )
+
+
+class RouterDebug(BaseModel):
+    """Устройство слоя (спека 5.4): что реально ушло в модель и что вернулось."""
+
+    turn_id: int | None
+    result: RouterResult | None
+
+
+def capabilities(p: Providers) -> Capabilities:
+    return Capabilities(
+        mock_mode=p.mock_mode,
+        providers={
+            "stt": p.stt.name,
+            "llm": p.router.name,
+            "executor": p.executor.name,
+            "responder": p.responder.name,
+            "tts": p.tts.name,
+            "background": p.background.name,
+        },
+        supported_actions=p.executor.supported_actions,
+        dataset_today=DATASET_TODAY.isoformat(),
+    )
+
+
+# --- эндпоинты ---------------------------------------------------------------
+
+
+@router.get("/capabilities", summary="Что умеет backend сейчас")
+async def get_capabilities(calls: Calls) -> Capabilities:
+    return capabilities(calls.providers)
+
+
+@router.post("/calls", status_code=201, summary="Начать звонок")
+async def start_call(calls: Calls) -> CallStarted:
+    ctx = await calls.contexts.start_call()
+    return CallStarted(
+        session_id=ctx.session_id, context=ctx, capabilities=capabilities(calls.providers)
+    )
+
+
+@router.post(
+    "/calls/{session_id}/reset",
+    summary="Новый звонок в той же сессии",
+    description="`generation + 1`, контекст и темы очищаются, история прошлого звонка не протекает.",
+    responses=NOT_FOUND,
+)
+async def reset_call(session_id: FreeSession, calls: Calls) -> SessionContext:
+    return await calls.contexts.start_call(session_id)
+
+
+@router.post(
+    "/calls/{session_id}/turns/text",
+    response_class=EventSourceResponse,
+    summary="Реплика текстом → поток событий",
+    description="Резервный канал ввода (спека 2.1). " + SSE_DOC,
+    responses=TURN_ERRORS,
+)
+async def text_turn(
+    session_id: FreeSession, body: TextTurn, calls: Calls
+) -> AsyncIterable[TurnEvent]:
+    async for e in calls.run_turn(
+        session_id, text=body.text.strip(), language_hint=body.language_hint
+    ):
+        yield ServerSentEvent(event=e.type, data=e)
+
+
+@router.post(
+    "/calls/{session_id}/turns/audio",
+    response_class=EventSourceResponse,
+    summary="Реплика голосом → поток событий",
+    description="multipart/form-data: `audio` (webm/ogg/wav, до 10 МБ) и `language_hint`. "
+    + SSE_DOC,
+    responses=TURN_ERRORS | {413: {"description": "Аудио больше 10 МБ"}},
+)
+async def audio_turn(
+    session_id: FreeSession,
+    calls: Calls,
+    audio: Annotated[UploadFile, File(description="Запись push-to-talk")],
+    language_hint: Annotated[Literal["ru", "kk"] | None, Form()] = None,
+) -> AsyncIterable[TurnEvent]:
+    data = await audio.read()
+    if not data:
+        raise HTTPException(422, "empty audio")
+    if len(data) > MAX_AUDIO_BYTES:
+        raise HTTPException(413, "audio too large")
+    async for e in calls.run_turn(
+        session_id, audio=data, mime=audio.content_type or "audio/webm", language_hint=language_hint
+    ):
+        yield ServerSentEvent(event=e.type, data=e)
+
+
+@router.post(
+    "/calls/{session_id}/turns/{turn_id}/cancel",
+    status_code=204,
+    summary="Стоп: отменить ход",
+    description="Кнопка «стоп» (спека 7.5): поздние текст и аудио этого хода не придут. "
+    "Обрыв fetch на клиенте тоже отменяет ход.",
+    responses=NOT_FOUND,
+)
+async def cancel_turn(session_id: Session, turn_id: TurnId, calls: Calls) -> None:
+    await calls.contexts.cancel_turn(session_id, turn_id)
+
+
+@router.post(
+    "/calls/{session_id}/turns/{turn_id}/playback",
+    status_code=204,
+    summary="Замер из браузера",
+    description="Фронт присылает время «конец речи → начало звука» (спека 10.2). "
+    "Пишется на доску как timing, версию контекста не меняет.",
+    responses=NOT_FOUND,
+)
+async def report_playback(
+    session_id: Session, turn_id: TurnId, body: Playback, calls: Calls
+) -> None:
+    await calls.contexts.log(
+        session_id, turn_id, "timing", "user", {"stage": "browser", **body.model_dump()}
+    )
+
+
+@router.get(
+    "/calls/{session_id}/router/last",
+    summary="Последний промпт и ответ роутера",
+    description="Экран «устройство слоя» (спека 5.4). `result=null`, пока роутер не отвечал.",
+    responses=NOT_FOUND,
+)
+async def last_router(session_id: Session, calls: Calls) -> RouterDebug:
+    snap = await calls.contexts.snapshot(session_id)
+    rr = calls.last_router.get(session_id)
+    return RouterDebug(turn_id=snap.turn_id if rr else None, result=rr)

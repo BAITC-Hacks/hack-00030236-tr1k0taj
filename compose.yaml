@@ -21,6 +21,9 @@ services:
     build: ./backend
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-voice_router}:${POSTGRES_PASSWORD:-voice_router}@db:5432/${POSTGRES_DB:-voice_router}
+      STT_PROVIDER: ${STT_PROVIDER:-mock}
+      LLM_PROVIDER: ${LLM_PROVIDER:-mock}
+      TTS_PROVIDER: ${TTS_PROVIDER:-mock}
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     volumes:
