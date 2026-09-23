@@ -47,6 +47,7 @@
 | [0009](docs/adr/0009-modular-backend.md) | Модули с публичным API, типы у владельца, без общего `schemas/` |
 | [0012](docs/adr/0012-module-layers.md) | Слои модулей и проверка импортов |
 | [0013](docs/adr/0013-tracer-opentelemetry.md) | Tracer: трассировка OpenTelemetry |
+| [0014](docs/adr/0014-kazakh-kb-search.md) | Казахский поиск по KB: ru/kk-расширения, несколько векторов, `just eval-search` |
 
 ## Роли (3 человека)
 

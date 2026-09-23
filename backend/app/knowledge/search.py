@@ -52,13 +52,20 @@ class Search:
         return Fact(key=f"{kind}.{key}", value=value, source="knowledge", source_id=f"{kind}:{key}")
 
     async def rag_query(
-        self, q: str, kinds: list[str] | None = None, limit: int = 3,
-        *, search_query: str | None = None,
+        self,
+        q: str,
+        kinds: list[str] | None = None,
+        limit: int = 3,
+        *,
+        search_query: str | None = None,
     ) -> dict:
         from app.knowledge.rag import RagIndex
 
         return await RagIndex(self._store.session.bind).query(
-            q, kinds, limit, search_query=search_query,
+            q,
+            kinds,
+            limit,
+            search_query=search_query,
         )
 
     async def reindex(self, batch_size: int = 64) -> dict:
@@ -66,9 +73,7 @@ class Search:
 
         return await RagIndex(self._store.session.bind).reindex(batch_size)
 
-    async def query(
-        self, q: str, kinds: list[str] | None = None, limit: int = 5
-    ) -> list[Hit]:
+    async def query(self, q: str, kinds: list[str] | None = None, limit: int = 5) -> list[Hit]:
         tsq = _tsquery(q)
         if not tsq:
             return []

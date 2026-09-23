@@ -52,7 +52,15 @@ migration message:
 
 # перезагрузить стартовый кит из datasets/ в БД (сбрасывает правки через CRUD)
 load-data:
-    docker compose exec backend python -m app.knowledge --reset
+    docker compose exec backend python -m app.knowledge load --reset
+
+# сгенерировать ru/kk-расширения поиска для KB (нужен OPENAI_API_KEY; результат коммитим)
+expand-kb *flags:
+    docker compose exec backend python -m app.knowledge expand {{flags}}
+
+# качество поиска по KB через rag_query: recall@1/@3 по ru/kk/mixed (без ключа — только лексика)
+eval-search:
+    docker compose exec backend python -m evals.search
 
 # psql в базу
 psql:

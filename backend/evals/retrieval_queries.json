@@ -1,0 +1,337 @@
+{
+ "meta": {
+  "about": "KB retrieval eval: client question -> expected KB topic. Written by hand, independently of the kit, dev_utterances.json and expansions.json. Kazakh items need review by a native speaker.",
+  "search_query": "English rewrite simulating the router output; filled once by `python -m evals.search --fill-search-query`"
+ },
+ "queries": [
+  {
+   "id": "K01",
+   "lang": "kk",
+   "text": "Полисті мерзімінен бұрын бұзсам, ақшаның бір бөлігі қайтарыла ма?",
+   "expected": "cancellation",
+   "search_query": "early policy termination partial refund"
+  },
+  {
+   "id": "K02",
+   "lang": "kk",
+   "text": "Өтінішке құжаттарды қалай жіберемін? Суретке түсіріп жіберсем бола ма?",
+   "expected": "claims.submission",
+   "search_query": "How to send documents for application? Can I send photos?"
+  },
+  {
+   "id": "K03",
+   "lang": "kk",
+   "text": "Қолма-қол ақшамен төлеуге бола ма?",
+   "expected": "payments",
+   "search_query": "cash payment allowed"
+  },
+  {
+   "id": "K04",
+   "lang": "kk",
+   "text": "Астанада ОГПО қанша тұрады?",
+   "expected": "products.ogpo.pricing",
+   "search_query": "OGPO cost in Astana"
+  },
+  {
+   "id": "K05",
+   "lang": "kk",
+   "text": "Жол апатына түстім, қазір не істеуім керек?",
+   "expected": "claims.road_accident_now",
+   "search_query": "What to do after a car accident?"
+  },
+  {
+   "id": "K06",
+   "lang": "kk",
+   "text": "Кіру үшін SMS код келмей жатыр",
+   "expected": "app_help",
+   "search_query": "SMS code not received for login"
+  },
+  {
+   "id": "K07",
+   "lang": "kk",
+   "text": "Шешім қанша уақытта шығады?",
+   "expected": "claims.decision_time",
+   "search_query": "decision processing time insurance"
+  },
+  {
+   "id": "K08",
+   "lang": "kk",
+   "text": "Шешім шыққан соң ақша қашан түседі?",
+   "expected": "claims.payout_time",
+   "search_query": "payment timing after claim decision"
+  },
+  {
+   "id": "K09",
+   "lang": "kk",
+   "text": "Байланыс орталығының телефоны қандай?",
+   "expected": "company.contact_center",
+   "search_query": "contact center phone number"
+  },
+  {
+   "id": "K10",
+   "lang": "kk",
+   "text": "КАСКО қандай жағдайларда төленбейді?",
+   "expected": "products.casco.exclusions",
+   "search_query": "When is CASCO insurance not paid?"
+  },
+  {
+   "id": "K11",
+   "lang": "kk",
+   "text": "Бонус-малус класы қалай есептеледі?",
+   "expected": "bonus_malus",
+   "search_query": "How is the bonus-malus class calculated?"
+  },
+  {
+   "id": "K12",
+   "lang": "kk",
+   "text": "Шағымым қанша уақытта қаралады?",
+   "expected": "complaints",
+   "search_query": "claim processing time"
+  },
+  {
+   "id": "K13",
+   "lang": "kk",
+   "text": "Сақтандыру оқиғасы туралы қанша күн ішінде хабарлау керек?",
+   "expected": "claims.notify_deadline",
+   "search_query": "insurance claim reporting deadline"
+  },
+  {
+   "id": "K14",
+   "lang": "kk",
+   "text": "Шенгенге сапарға сақтандыру қанша тұрады?",
+   "expected": "products.travel.zones",
+   "search_query": "Schengen travel insurance cost"
+  },
+  {
+   "id": "K15",
+   "lang": "kk",
+   "text": "Су басып кетті, пәтер бойынша қандай құжаттар керек?",
+   "expected": "claims.documents.property",
+   "search_query": "documents needed for apartment flood claim"
+  },
+  {
+   "id": "K16",
+   "lang": "kk",
+   "text": "ДМС картасы қайда көрінеді?",
+   "expected": "products.dms.e_card",
+   "search_query": "Where to find DMS card"
+  },
+  {
+   "id": "K17",
+   "lang": "kk",
+   "text": "Жеке ДМС жылына қанша тұрады?",
+   "expected": "products.dms.individual_price_per_year_kzt",
+   "search_query": "individual DMS annual cost"
+  },
+  {
+   "id": "K18",
+   "lang": "kk",
+   "text": "Үйді сақтандыру нені өтейді?",
+   "expected": "products.property",
+   "search_query": "What does home insurance cover?"
+  },
+  {
+   "id": "K19",
+   "lang": "kk",
+   "text": "Жазатайым оқиғадан сақтандыру не үшін керек?",
+   "expected": "products.accident",
+   "search_query": "why is accident insurance needed"
+  },
+  {
+   "id": "K20",
+   "lang": "kk",
+   "text": "Шешіммен келіспеймін, қайда жүгінсем болады?",
+   "expected": "claims.dispute",
+   "search_query": "disagree with decision where to appeal insurance company"
+  },
+  {
+   "id": "K21",
+   "lang": "kk",
+   "text": "Сіздер өмірді сақтандырасыздар ма?",
+   "expected": "company.not_offered",
+   "search_query": "Do you offer life insurance?"
+  },
+  {
+   "id": "K22",
+   "lang": "kk",
+   "text": "Полистің көшірмесін қалай аламын?",
+   "expected": "documents_available",
+   "search_query": "how to get a copy of the policy"
+  },
+  {
+   "id": "K23",
+   "lang": "kk",
+   "text": "Біреу хабарласып SMS кодты сұрады, бұл сіздер ме?",
+   "expected": "fraud_policy",
+   "search_query": "SMS code request from unknown person"
+  },
+  {
+   "id": "K24",
+   "lang": "kk",
+   "text": "КАСКО-ны бөліп төлеуге бола ма?",
+   "expected": "payments",
+   "search_query": "Is it possible to pay CASCO in installments?"
+  },
+  {
+   "id": "K25",
+   "lang": "kk",
+   "text": "ОГПО полисі төлегеннен кейін қалай келеді?",
+   "expected": "products.ogpo.policy_delivery",
+   "search_query": "How is OGPO policy received after payment?"
+  },
+  {
+   "id": "M01",
+   "lang": "mixed",
+   "text": "Полисті расторгнуть етсем, деньги вернут ба?",
+   "expected": "cancellation",
+   "search_query": "policy cancellation refund conditions"
+  },
+  {
+   "id": "M02",
+   "lang": "mixed",
+   "text": "Документтерді куда отправить керек, фото подойдёт па?",
+   "expected": "claims.submission",
+   "search_query": "where to send documents and is photo acceptable"
+  },
+  {
+   "id": "M03",
+   "lang": "mixed",
+   "text": "ОГПО Астанада сколько стоит екен?",
+   "expected": "products.ogpo.pricing",
+   "search_query": "OGPO Astana price"
+  },
+  {
+   "id": "M04",
+   "lang": "mixed",
+   "text": "Код не приходит, приложениеге кіре алмай жатырмын",
+   "expected": "app_help",
+   "search_query": "code not received cannot access app"
+  },
+  {
+   "id": "M05",
+   "lang": "mixed",
+   "text": "Выплата қашан болады, решение шықты ғой",
+   "expected": "claims.payout_time",
+   "search_query": "payment status decision issued"
+  },
+  {
+   "id": "M06",
+   "lang": "mixed",
+   "text": "Наличными төлеуге болады ма?",
+   "expected": "payments",
+   "search_query": "cash payment options"
+  },
+  {
+   "id": "M07",
+   "lang": "mixed",
+   "text": "ДМС карта где посмотреть, қосымшада бар ма?",
+   "expected": "products.dms.e_card",
+   "search_query": "DMS card where to check in app"
+  },
+  {
+   "id": "M08",
+   "lang": "mixed",
+   "text": "Решениемен согласен емеспін, что делать?",
+   "expected": "claims.dispute",
+   "search_query": "disagree with decision what to do"
+  },
+  {
+   "id": "M09",
+   "lang": "mixed",
+   "text": "КАСКО-да какие пакеты бар?",
+   "expected": "products.casco.packages",
+   "search_query": "КАСКО insurance packages available"
+  },
+  {
+   "id": "M10",
+   "lang": "mixed",
+   "text": "Жизнь страхуете ма?",
+   "expected": "company.not_offered",
+   "search_query": "life insurance options"
+  },
+  {
+   "id": "R01",
+   "lang": "ru",
+   "text": "Если расторгну полис досрочно, вернут ли деньги?",
+   "expected": "cancellation",
+   "search_query": "early policy termination refund"
+  },
+  {
+   "id": "R02",
+   "lang": "ru",
+   "text": "Как отправить документы по заявлению, фото подойдёт?",
+   "expected": "claims.submission",
+   "search_query": "how to submit claim documents photo acceptable"
+  },
+  {
+   "id": "R03",
+   "lang": "ru",
+   "text": "Можно ли оплатить наличными?",
+   "expected": "payments",
+   "search_query": "pay with cash"
+  },
+  {
+   "id": "R04",
+   "lang": "ru",
+   "text": "Сколько стоит ОГПО в Астане?",
+   "expected": "products.ogpo.pricing",
+   "search_query": "OGPO cost Astana"
+  },
+  {
+   "id": "R05",
+   "lang": "ru",
+   "text": "Попал в ДТП, что делать прямо сейчас?",
+   "expected": "claims.road_accident_now",
+   "search_query": "What to do immediately after a car accident?"
+  },
+  {
+   "id": "R06",
+   "lang": "ru",
+   "text": "Не приходит СМС-код для входа",
+   "expected": "app_help",
+   "search_query": "SMS code not received for login"
+  },
+  {
+   "id": "R07",
+   "lang": "ru",
+   "text": "Когда придут деньги после решения?",
+   "expected": "claims.payout_time",
+   "search_query": "payment timing after claim approval"
+  },
+  {
+   "id": "R08",
+   "lang": "ru",
+   "text": "Какой телефон контакт-центра?",
+   "expected": "company.contact_center",
+   "search_query": "contact center phone number"
+  },
+  {
+   "id": "R09",
+   "lang": "ru",
+   "text": "Есть ли у вас страхование жизни?",
+   "expected": "company.not_offered",
+   "search_query": "life insurance availability"
+  },
+  {
+   "id": "R10",
+   "lang": "ru",
+   "text": "Не согласен с суммой выплаты, куда обращаться?",
+   "expected": "claims.dispute",
+   "search_query": "dispute insurance payout amount where to contact"
+  },
+  {
+   "id": "R11",
+   "lang": "ru",
+   "text": "Мне позвонили и попросили код из СМС, это вы?",
+   "expected": "fraud_policy",
+   "search_query": "Received call asking for SMS code, is it from company?"
+  },
+  {
+   "id": "R12",
+   "lang": "ru",
+   "text": "Как получить дубликат полиса?",
+   "expected": "documents_available",
+   "search_query": "how to get a duplicate insurance policy"
+  }
+ ]
+}

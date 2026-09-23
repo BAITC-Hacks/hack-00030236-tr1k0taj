@@ -12,6 +12,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from app.config import settings
+from app.knowledge.expansions import load_expansions
 
 RAG_KINDS = ("kb", "office", "clinic", "inspection_point")
 MAX_QUERY_CHARS = 4000
@@ -21,33 +22,48 @@ _VALID_VECTOR = """
     e.kind = k.kind AND e.key = k.key AND e.model = :model
     AND e.dimensions = :dimensions AND e.text_hash = md5(k.search_text)
 """
+# A record has several vectors (idx 0 = original text, 1.. = ru/kk/mixed questions); coverage
+# and pending are counted per record, similarity of a record = its best variant (ADR 0010).
 _COVERAGE = text(
-    f"""SELECT count(*) AS total, count(e.key) AS indexed
+    f"""SELECT count(DISTINCT k.kind || ':' || k.key) AS total,
+               count(DISTINCT e.kind || ':' || e.key) AS indexed
         FROM kit_records k LEFT JOIN knowledge_vectors e ON {_VALID_VECTOR}
         WHERE k.kind = ANY(:kinds)"""
 )
 _PENDING = text(
-    f"""SELECT k.kind, k.key, k.search_text, md5(k.search_text) AS text_hash
+    f"""SELECT DISTINCT k.kind, k.key, k.payload, k.search_text, md5(k.search_text) AS text_hash
         FROM kit_records k LEFT JOIN knowledge_vectors e ON {_VALID_VECTOR}
         WHERE k.kind = ANY(:kinds) AND e.key IS NULL
         ORDER BY k.kind, k.key"""
 )
+# With search_query: similarity = RAW_WEIGHT * sim(client text) + (1 - RAW_WEIGHT) * sim(English)
+RAW_WEIGHT = 0.3
+# Lexical ranking weight in RRF (semantic = 1.0). Tuned on `just eval-search`.
+LEXICAL_RRF_WEIGHT = 0.3
 _SEMANTIC = text(
-    f"""SELECT k.kind, k.key, k.payload, left(k.search_text, 240) AS snippet
+    f"""SELECT k.kind, k.key, k.payload, left(k.search_text, 240) AS snippet,
+               :w_raw * max(1 - (e.embedding <=> CAST(:embedding AS vector)))
+               + (1 - :w_raw) * max(1 - (e.embedding <=> CAST(:embedding_en AS vector)))
+               AS similarity
         FROM kit_records k JOIN knowledge_vectors e ON {_VALID_VECTOR}
         WHERE k.kind = ANY(:kinds)
-        ORDER BY e.embedding <=> CAST(:embedding AS vector), k.kind, k.key
+        GROUP BY k.kind, k.key
+        ORDER BY similarity DESC, k.kind, k.key
         LIMIT :limit"""
 )
 _UPSERT = text(
-    """INSERT INTO knowledge_vectors (kind, key, model, dimensions, text_hash, embedding)
-       SELECT kind, key, :model, :dimensions, CAST(:text_hash AS text), CAST(:embedding AS vector)
+    """INSERT INTO knowledge_vectors (kind, key, idx, model, dimensions, text_hash, embedding)
+       SELECT kind, key, :idx, :model, :dimensions, CAST(:text_hash AS text),
+              CAST(:embedding AS vector)
        FROM kit_records
        WHERE kind = :kind AND key = :key AND md5(search_text) = :text_hash
-       ON CONFLICT (kind, key) DO UPDATE SET
+       ON CONFLICT (kind, key, idx) DO UPDATE SET
            model = EXCLUDED.model, dimensions = EXCLUDED.dimensions,
            text_hash = EXCLUDED.text_hash, embedding = EXCLUDED.embedding,
            updated_at = now()"""
+)
+_DROP_EXTRA_VARIANTS = text(
+    "DELETE FROM knowledge_vectors WHERE kind = :kind AND key = :key AND idx >= :count"
 )
 
 
@@ -99,17 +115,49 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
     return vectors
 
 
-def fuse_ranks(lexical: list[dict], semantic: list[dict], limit: int) -> list[dict]:
+def fuse_ranks(
+    lexical: list[dict],
+    semantic: list[dict],
+    limit: int,
+    *,
+    lexical_weight: float = 1.0,
+) -> list[dict]:
     """Reciprocal rank fusion; scores are rank weights, not factual confidence."""
     scores: dict[tuple[str, str], float] = defaultdict(float)
     documents: dict[tuple[str, str], dict] = {}
-    for ranking in (lexical, semantic):
+    for ranking, weight in ((lexical, lexical_weight), (semantic, 1.0)):
         for rank, hit in enumerate(ranking, start=1):
             identity = (hit["kind"], hit["key"])
-            scores[identity] += 1 / (60 + rank)
+            scores[identity] += weight / (60 + rank)
             documents[identity] = hit
     identities = sorted(scores, key=lambda identity: (-scores[identity], identity))[:limit]
     return [{**documents[key], "score": round(scores[key], 6)} for key in identities]
+
+
+def _record_texts(row, expansions: dict[str, dict]) -> list[str]:
+    """Texts to embed for one record: its document text first, then fresh ru/kk/mixed
+    expansion questions. Records without an expansion keep the single original vector."""
+    from app.knowledge.loader import document_variants
+
+    variants = document_variants(row["kind"], row["key"], row["payload"], expansions)
+    if len(variants) == 1:
+        return [f"{row['kind']}: {row['key']}\n{row['search_text']}"]
+    # Questions stay unprefixed: an English "kb: key" header hurts Kazakh matching
+    # (eval: kk recall@3 1.00 -> 0.76 with the prefix).
+    return [f"{row['kind']}: {row['key']}\n{variants[0][1]}"] + [t for _, t in variants[1:]]
+
+
+def _record_batches(records: list, batch_size: int):
+    """Group whole records so one batch holds about batch_size texts (at least one record)."""
+    batch, size = [], 0
+    for record in records:
+        if batch and size + len(record[1]) > batch_size:
+            yield batch
+            batch, size = [], 0
+        batch.append(record)
+        size += len(record[1])
+    if batch:
+        yield batch
 
 
 def sourced(hit: dict) -> dict:
@@ -122,7 +170,12 @@ class RagIndex:
         self.sessions = async_sessionmaker(bind, expire_on_commit=False)
 
     async def query(
-        self, q: str, kinds: list[str] | None, limit: int, *, search_query: str | None = None,
+        self,
+        q: str,
+        kinds: list[str] | None,
+        limit: int,
+        *,
+        search_query: str | None = None,
     ) -> dict:
         from app.knowledge.search import Search
         from app.knowledge.store import Store
@@ -130,8 +183,10 @@ class RagIndex:
         started = asyncio.get_running_loop().time()
         kinds = document_kinds(kinds)
         q = q.strip()
-        semantic_query = (search_query or q).strip()
-        if not semantic_query or len(semantic_query) > MAX_QUERY_CHARS:
+        # search_query: English rewrite from the router (same LLM call). Searched together with
+        # the client's own words; alone it loses nuance, the raw text alone misses Kazakh.
+        search_query = (search_query or "").strip() or None
+        if search_query and len(search_query) > MAX_QUERY_CHARS:
             raise ValueError("Invalid semantic search query")
         if not q or len(q) > MAX_QUERY_CHARS or not 1 <= limit <= 20:
             raise ValueError("RAG query requires 1..4000 characters and limit 1..20")
@@ -161,7 +216,7 @@ class RagIndex:
             elapsed = asyncio.get_running_loop().time() - started
             budget = max(0, settings.llm_timeout_seconds * 0.75 - elapsed)
             async with asyncio.timeout(budget):
-                vector = (await embed_texts([semantic_query]))[0]
+                vectors = await embed_texts([q, search_query] if search_query else [q])
         except (APIError, ValueError, TimeoutError):
             return {**fallback, "degraded_reason": "embedding_request_failed"}
         try:
@@ -182,12 +237,27 @@ class RagIndex:
                     for hit in await Search(Store(session)).query(q, kinds, max(20, limit * 4))
                 ]
                 semantic = (
-                    await session.execute(
-                        _SEMANTIC,
-                        {**params, "embedding": json.dumps(vector), "limit": max(20, limit * 4)},
+                    (
+                        await session.execute(
+                            _SEMANTIC,
+                            {
+                                **params,
+                                "embedding": json.dumps(vectors[0]),
+                                "embedding_en": json.dumps(vectors[-1]),
+                                "w_raw": RAW_WEIGHT if search_query else 1.0,
+                                "limit": max(20, limit * 4),
+                            },
+                        )
                     )
-                ).mappings().all()
-                hits = fuse_ranks(lexical, [dict(row) for row in semantic], limit)
+                    .mappings()
+                    .all()
+                )
+                hits = fuse_ranks(
+                    lexical,
+                    [dict(row) for row in semantic],
+                    limit,
+                    lexical_weight=LEXICAL_RRF_WEIGHT,
+                )
             return {"hits": [sourced(hit) for hit in hits], "search_mode": "hybrid"}
         except SQLAlchemyError:
             return {**fallback, "degraded_reason": "index_unavailable"}
@@ -199,23 +269,24 @@ class RagIndex:
         if reason := embedding_unavailable():
             return {**result, "status": "disabled", "degraded_reason": reason}
         params = _parameters(list(RAG_KINDS))
+        expansions = load_expansions()
         try:
             async with self.sessions() as session:
                 pending = (await session.execute(_PENDING, params)).mappings().all()
-            for start in range(0, len(pending), batch_size):
-                batch = pending[start : start + batch_size]
-                texts = [f"{row['kind']}: {row['key']}\n{row['search_text']}" for row in batch]
-                # Do not silently truncate public CRUD documents or pass provider-sized surprises.
-                safe = [
-                    (row, value)
-                    for row, value in zip(batch, texts, strict=True)
-                    if len(value) <= MAX_DOCUMENT_CHARS
-                ]
-                result["skipped"] += len(batch) - len(safe)
-                if not safe:
-                    continue
+            # Do not silently truncate public CRUD documents or pass provider-sized surprises.
+            records = []
+            for row in pending:
+                texts = _record_texts(row, expansions)
+                if all(len(t) <= MAX_DOCUMENT_CHARS for t in texts):
+                    records.append((row, texts))
+                else:
+                    result["skipped"] += 1
+            for batch in _record_batches(records, batch_size):
+                flat = [t for _, texts in batch for t in texts]
                 try:
-                    vectors = await embed_texts([value for _, value in safe])
+                    vectors = []
+                    for start in range(0, len(flat), batch_size):
+                        vectors += await embed_texts(flat[start : start + batch_size])
                 except (APIError, ValueError, TimeoutError):
                     return {
                         **result,
@@ -223,15 +294,31 @@ class RagIndex:
                         "degraded_reason": "embedding_request_failed",
                     }
                 batch_indexed = 0
+                offset = 0
+                # All variants of a record land in one transaction, so a record is either fully
+                # indexed or not at all (coverage counts records).
                 async with self.sessions.begin() as session:
-                    for (row, _), vector in zip(safe, vectors, strict=True):
-                        written = await session.execute(
-                            _UPSERT,
-                            {**params, **dict(row), "embedding": json.dumps(vector)},
+                    for row, texts in batch:
+                        written = 0
+                        for idx, vector in enumerate(vectors[offset : offset + len(texts)]):
+                            res = await session.execute(
+                                _UPSERT,
+                                {
+                                    **params,
+                                    **dict(row),
+                                    "idx": idx,
+                                    "embedding": json.dumps(vector),
+                                },
+                            )
+                            written += res.rowcount
+                        await session.execute(
+                            _DROP_EXTRA_VARIANTS,
+                            {"kind": row["kind"], "key": row["key"], "count": len(texts)},
                         )
-                        batch_indexed += written.rowcount
+                        offset += len(texts)
+                        batch_indexed += written == len(texts)
                 result["indexed"] += batch_indexed
-                result["skipped"] += len(safe) - batch_indexed
+                result["skipped"] += len(batch) - batch_indexed
             if result["skipped"]:
                 return {**result, "status": "degraded", "degraded_reason": "index_incomplete"}
             return result
