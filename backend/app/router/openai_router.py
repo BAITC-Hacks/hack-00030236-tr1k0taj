@@ -18,6 +18,16 @@ from app.router.types import RouterOutput, RouterResult
 
 PROMPT_CACHE_KEY = "router-v1"  # ADR 0004 perf: стабильный ключ для OpenAI prompt caching
 
+# Ризонинг-токены генерируются до первого видимого токена, поэтому на критическом
+# пути они не нужны. Параметр принимают только ризонинг-модели: остальным его слать нельзя.
+_REASONING_PREFIXES = ("gpt-5", "o1", "o3", "o4")
+
+
+def _reasoning_off(model: str) -> dict:
+    name = (model or "").lower()
+    if any(name.startswith(prefix) for prefix in _REASONING_PREFIXES):
+        return {"reasoning": {"effort": "minimal"}}
+    return {}
 
 class RouterUnavailable(Exception):
     """Роутер не настроен или провайдер упал. call превращает это в событие error с кодом."""
@@ -221,9 +231,10 @@ class OpenAIRouter:
                 text={"format": {"type": "json_schema", "name": "router_output", "strict": True,
                                  "schema": output_schema(ids)}},
                 temperature=0,
-                max_output_tokens=500,
+                max_output_tokens=settings.router_max_output_tokens,
                 store=False,
                 prompt_cache_key=PROMPT_CACHE_KEY,
+                **_reasoning_off(self.model),
             ) as stream:
                 async for event in stream:
                     if getattr(event, "type", "") == "response.output_text.delta":
