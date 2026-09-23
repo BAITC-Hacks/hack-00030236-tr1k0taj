@@ -5,8 +5,15 @@
 
 from app.speech.errors import ProviderUnavailable
 from app.speech.mocks import MockSpeechToText, MockTextToSpeech
-from app.speech.ports import AudioChunk, SpeechLanguage, SpeechToText, TextToSpeech, Transcript
-from app.speech.providers import STT, TTS, build_stt, build_tts
+from app.speech.ports import (
+    AudioChunk,
+    RealtimeSession,
+    SpeechLanguage,
+    SpeechToText,
+    TextToSpeech,
+    Transcript,
+)
+from app.speech.providers import STT, TTS, build_stt, build_tts, create_realtime_stt_session
 from app.speech.text import SENTENCE_END, split_sentences
 
 __all__ = [
@@ -17,11 +24,13 @@ __all__ = [
     "MockSpeechToText",
     "MockTextToSpeech",
     "ProviderUnavailable",
+    "RealtimeSession",
     "SpeechLanguage",
     "SpeechToText",
     "TextToSpeech",
     "Transcript",
     "build_stt",
     "build_tts",
+    "create_realtime_stt_session",
     "split_sentences",
 ]

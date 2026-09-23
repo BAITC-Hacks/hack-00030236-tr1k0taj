@@ -1,6 +1,7 @@
 "use client";
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { useRecorder } from "@/hooks/use-recorder";
+import { useRealtimeStt, type RealtimeSttResult } from "@/hooks/use-realtime-stt";
 import { usePreferences } from "@/hooks/use-preferences";
 import { useAudioQueue } from "@/hooks/use-audio-queue";
 import { ApiError, voiceAdapter } from "@/lib/api";
@@ -20,7 +21,24 @@ function useVoiceState(adapter: VoiceAdapter) {
   const [toast, setToast] = useState<TranslationKey | null>(null);
   const [health, setHealth] = useState<"loading" | "ok" | "error">("loading");
   const [capabilities, setCapabilities] = useState<Capabilities | null>(null);
-  const recorder = useRecorder(); const playback = useAudioQueue(sound, volume / 100);
+  const baseRecorder = useRecorder(); const playback = useAudioQueue(sound, volume / 100);
+  const sessionIdRef = useRef<string | undefined>(undefined);
+  const sttPromise = useRef<Promise<RealtimeSttResult> | null>(null);
+  const stt = useRealtimeStt((languageHint, signal) => {
+    const sid = sessionIdRef.current;
+    if (!sid || !adapter.sttSession) return Promise.reject(new Error("stt_session_unavailable"));
+    return adapter.sttSession(sid, languageHint, signal);
+  });
+  const recorder = {
+    ...baseRecorder,
+    start: () => {
+      sttPromise.current = null;
+      if (sessionIdRef.current) void stt.start(locale);
+      return baseRecorder.start();
+    },
+    stop: () => { sttPromise.current = stt.stop(); baseRecorder.stop(); },
+    discard: () => { sttPromise.current = null; stt.discard(); baseRecorder.discard(); },
+  };
   const request = useRef<{ token: number; busy: boolean; controller?: AbortController; sessionId?: string; turnId?: number; traceparent?: string }>({ token: 0, busy: false });
   const publish = useCallback((next: Conversation | null) => { sessionRef.current = next; setSession(next); }, []);
   useEffect(() => {
@@ -40,6 +58,7 @@ function useVoiceState(adapter: VoiceAdapter) {
   useEffect(() => { if (!toast) return; const timeout = setTimeout(() => setToast(null), 4000); return () => clearTimeout(timeout); }, [toast]);
   useEffect(() => () => { request.current.token++; request.current.controller?.abort(); }, []);
   const sessionId = session?.id; const generation = session?.generation;
+  useEffect(() => { sessionIdRef.current = sessionId; }, [sessionId]);
   const isLive = session?.mode === "live" && !session.endedAt;
   useEffect(() => {
     if (!isLive || !sessionId) return;
@@ -89,6 +108,16 @@ function useVoiceState(adapter: VoiceAdapter) {
     setBusy(true); setNotice(null);
     const submittedDraft = typeof value === "string" && draft.trim() === value.trim() ? draft : null;
     const eos = typeof value === "string" ? null : recorder.endedAt;
+    // Realtime STT (WebRTC, docs/specs/speech-module.md) already ran while recording; its final
+    // transcript lets the ход start as text (source stt) instead of uploading and re-transcribing audio.
+    let sttResult: RealtimeSttResult = null;
+    if (typeof value !== "string" && sttPromise.current) {
+      sttResult = await sttPromise.current.catch(() => null);
+      sttPromise.current = null;
+      if (controller.signal.aborted || token !== request.current.token) return false;
+    }
+    const effectiveValue: string | Blob = sttResult?.text ? sttResult.text : value;
+    const sttSource = Boolean(sttResult?.text) && typeof value !== "string";
     let firstText: number | undefined;
     let current = sessionRef.current;
     let turn: Turn | undefined;
@@ -113,14 +142,14 @@ function useVoiceState(adapter: VoiceAdapter) {
       }
       const base = current;
       request.current.sessionId = base.id;
-      turn = { id: -Date.now(), text: typeof value === "string" ? value : "", answer: "", language: "—", channel: typeof value === "string" ? "text" : "voice", scenarios: [], alternatives: [], slots: {}, facts: [], timings: {}, status: "processing" };
+      turn = { id: -Date.now(), text: typeof effectiveValue === "string" ? effectiveValue : "", answer: "", language: "—", channel: typeof value === "string" ? "text" : "voice", scenarios: [], alternatives: [], slots: {}, facts: [], timings: {}, status: "processing" };
       const commitTurn = () => {
         if (!valid() || !turn) return;
         current = { ...current!, turns: [...base.turns, turn] };
         publish(current); setSelectedTurn(turn.id);
       };
       commitTurn();
-      await adapter.stream(base.id, value, event => {
+      await adapter.stream(base.id, effectiveValue, event => {
         if (!valid() || !turn) return;
         if (event.type === "turn.started") {
           if (event.session_id !== base.id || event.generation !== base.generation) throw new Error("Stale session generation");
@@ -137,7 +166,7 @@ function useVoiceState(adapter: VoiceAdapter) {
         if (!valid() || !turn) return;
         request.current.traceparent = metadata.traceparent;
         turn = { ...turn, ...metadata }; commitTurn();
-      });
+      }, sttSource ? { source: "stt" } : undefined);
       if (!valid()) return false;
       const results = await Promise.allSettled([
         adapter.context(base.id, controller.signal), adapter.debug(base.id, controller.signal), adapter.board(base.id, controller.signal),
