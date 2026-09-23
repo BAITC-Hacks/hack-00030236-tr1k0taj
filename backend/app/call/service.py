@@ -325,6 +325,9 @@ class _Turn:
         self.task_id = task_id
         self.updates = list(updates or [])
         self.interrupt_previous = interrupt_previous
+        self.rag_prefetch: asyncio.Task | None = None
+        self._rag_prefetch_start: float | None = None
+        self._router_done_at: float | None = None
         # Span хода открыт явно (не current): генератор отдаёт события через yield, и контекст
         # OTel не должен «висеть» между кусками SSE. Этапы делают его текущим только внутри
         # блоков без yield (_child), задачи ответа получают его копией контекста при создании.
@@ -359,10 +362,44 @@ class _Turn:
     def close(self) -> None:
         if not self.finished:
             self.span.add_event("cancelled")
+        if self.rag_prefetch is not None and not self.rag_prefetch.done():
+            self.rag_prefetch.cancel()
         self.span.set_attributes({f"sse.events.{t}": n for t, n in self.sse_counts.items()})
         self.span.set_attributes({f"latency.{k}_ms": v for k, v in
                                   self.latency.model_dump().items() if v is not None})
         self.span.end()
+
+    async def _prefetch_rag(self, query: str) -> list[dict]:
+        """KB-поиск параллельно с роутером: если к моменту ответа есть sourced facts,
+        ядро не форсирует раунд rag_search (perf: voice-router-spec 10)."""
+        try:
+            async with open_knowledge() as kb:
+                result = await kb.search.rag_query(query, ["kb"], 3)
+        except Exception:  # noqa: BLE001 — best-effort: неудача не должна портить ход
+            return []
+        hits = result.get("hits", []) if isinstance(result, dict) else []
+        return [{"text": hit.get("content", ""), "source_ids": [hit["source_id"]]}
+                for hit in hits if hit.get("source_id")]
+
+    async def _await_rag_prefetch(self) -> list[dict]:
+        """Ждём префетч не дольше ~150мс после роутера: не готов — едем без него,
+        ядро само сделает rag_search."""
+        if self.rag_prefetch is None:
+            return []
+        budget = 0.15 - max(0.0, time.perf_counter() - (self._router_done_at or time.perf_counter()))
+        facts: list[dict] = []
+        try:
+            facts = (self.rag_prefetch.result() if self.rag_prefetch.done()
+                     else await asyncio.wait_for(asyncio.shield(self.rag_prefetch), max(0.0, budget)))
+        except Exception:  # noqa: BLE001, S110 — таймаут/ошибка префетча не должны тормозить ответ
+            pass
+        with span("rag.prefetch", {
+            "session.id": self.sid, "turn.id": self.turn_id, "rag.hits": len(facts),
+            "rag.prefetch.overlap_ms": _ms(self._rag_prefetch_start or time.perf_counter(),
+                                          min(time.perf_counter(), self._router_done_at or time.perf_counter())),
+        }):
+            pass
+        return facts
 
     def _stage(self, name: str, start: float) -> int:
         ms = _ms(start)
@@ -425,6 +462,8 @@ class _Turn:
         )
 
         try:
+            self._rag_prefetch_start = time.perf_counter()
+            self.rag_prefetch = asyncio.create_task(self._prefetch_rag(tr.text))
             async with open_knowledge() as kb:
                 # --- роутер -------------------------------------------------------
                 t = time.perf_counter()
@@ -449,6 +488,7 @@ class _Turn:
                     except Exception:  # noqa: BLE001
                         failure = ("router_failed", "Не удалось определить запрос.", "Сервис временно недоступен.")
                     self.latency.router = self._stage("router", t)
+                    self._router_done_at = time.perf_counter()
                     if failure:
                         _fail(s, "router", failure[0], failure[1])
                     else:
@@ -692,6 +732,8 @@ class _Turn:
                 "client_id": snapshot.client_id,
                 "search_query": getattr(self.router_out, "search_query", None),
             }
+            if not context["facts"]:
+                context["facts"] = await self._await_rag_prefetch()
             completed = False
             async for envelope in self.svc.kernel.stream_turn(
                 self.sid, self.turn_id, transcript, context,
