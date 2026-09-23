@@ -49,6 +49,8 @@ from app.tracer import get_tracer, span
 
 _EARLY_BREAK = re.compile(r"[,.!?;:]")
 _FILLER_TEXT = {"ru": "Секунду, проверяю.", "kk": "Бір сәт, тексеріп жатырмын."}
+_FALLBACK_REPLY = {"ru": "Извините, повторите, пожалуйста.", "kk": "Кешіріңіз, қайталап жіберіңізші."}
+_BUSY_WAIT_S = 2.0
 _filler_cache: dict[tuple[str, str], tuple[str, bytes] | None] = {}
 _filler_locks: defaultdict[tuple[str, str], asyncio.Lock] = defaultdict(asyncio.Lock)
 
@@ -221,6 +223,13 @@ class CallService:
             await self._recover_requests(sid)
             if await self.journal.lookup(sid, rid, digest) is not None:
                 return rid, False
+            if self.busy(sid) and not interrupt_previous:
+                # Клиент мог получить turn.done, пока предыдущий ход ещё дописывает
+                # тайминги/трассу (busy() не спадает мгновенно): недолго подождём
+                # вместо немедленного 409 — гарантия «один foreground-ход» не меняется.
+                deadline = time.monotonic() + _BUSY_WAIT_S
+                while self.busy(sid) and time.monotonic() < deadline:
+                    await asyncio.sleep(0.05)
             if self.busy(sid):
                 if not interrupt_previous:
                     raise KernelError("turn_in_progress", "Предыдущий ход ещё идёт")
@@ -843,6 +852,36 @@ class _Turn:
             if not context["facts"]:
                 context["facts"] = await self._await_rag_prefetch()
             completed = False
+
+            async def fail_gracefully(code: str) -> None:
+                """Ядро оборвалось: без текста — короткая честная фраза, с текстом — оставляем как есть.
+                Ход всё равно доходит до reply.done + audio + turn.done (AGENTS.md: ошибка
+                провайдера не роняет звонок)."""
+                nonlocal full, first, completed
+                had_text = bool(full.strip())
+                resp.set_attribute("responder.failed_code", code)
+                resp.add_event("response_failed", {"error.code": code, "had_text": had_text})
+                for pending_id, pending_text in list(segment_text.items()):
+                    if pending_text.strip():
+                        await sentences.put((pending_text.strip(), response_id, pending_id))
+                segment_text.clear()
+                if not had_text:
+                    if first:
+                        first_token()
+                        first = False
+                    fallback = _FALLBACK_REPLY.get(brief.language, _FALLBACK_REPLY["ru"])
+                    full = fallback
+                    await out.put(ReplyDeltaEvent(
+                        turn_id=self.turn_id, text=fallback, response_id=response_id,
+                    ))
+                    await sentences.put((fallback, response_id, None))
+                await out.put(await self._error(
+                    "responder", code,
+                    "Ответ ядра прервался, отвечаем короткой фразой." if not had_text
+                    else "Ответ ядра завершился частично.",
+                ))
+                completed = True
+
             async for envelope in self.svc.kernel.stream_turn(
                 self.sid, self.turn_id, transcript, context,
                 request_id=self.request_id, task_id=self.task_id, updates=self.updates,
@@ -878,18 +917,14 @@ class _Turn:
                 elif kind == "response.interrupted":
                     raise _Cancelled
                 elif kind == "response.failed":
-                    raise ProviderUnavailable(
-                        "responder", payload.get("code", "generation_failed"),
-                        payload.get("message", "Не удалось завершить ответ."),
-                    )
+                    await fail_gracefully(payload.get("code", "generation_failed"))
+                    break
                 elif kind == "response.completed":
                     completed = True
                     break
                 # Internal events and control metadata never enter the client text.
             if not completed:
-                raise ProviderUnavailable(
-                    "responder", "stream_incomplete", "Поток ответа завершился преждевременно."
-                )
+                await fail_gracefully("stream_incomplete")
             await sentences.put(None)
             self.latency.response = self._stage("response", t)
             resp.set_attribute("reply.chars", len(full))

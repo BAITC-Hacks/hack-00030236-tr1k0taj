@@ -142,7 +142,12 @@ def package(state, response_id=None, *, agent=None, task_id=None):
             if item["role"] == "user":
                 admit("history_summary", {"turn_id": item["turn_id"], "kind": "user_excerpt",
                     "text": item.get("text", "")[:400], "truncated": len(item.get("text", "")) > 400})
-    result["has_sources"] = bool(result["sources"] or result["background"])
+    # Исполнитель мог уже приложить факты с источником прямо в call_brief (детерминированные
+    # чтения, ADR 0005): это тоже источники, а не только rag/background фонового агента.
+    brief_facts = result["context"].get("call_brief", {}).get("facts") if isinstance(
+        result["context"], dict
+    ) else None
+    result["has_sources"] = bool(result["sources"] or result["background"] or brief_facts)
     result["context_chars"] = _size(result)
     return result
 
