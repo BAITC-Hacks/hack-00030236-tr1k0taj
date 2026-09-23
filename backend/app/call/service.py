@@ -711,13 +711,19 @@ class _Turn:
                         first = False
                     full += delta
                     if segment_id:
-                        segment_text[segment_id] = segment_text.get(segment_id, "") + delta
+                        # озвучиваем по предложениям, не дожидаясь конца сегмента ядра
+                        *done, segment_text[segment_id] = split_sentences(
+                            segment_text.get(segment_id, "") + delta
+                        )
+                        for sentence in done:
+                            if sentence.strip():
+                                await sentences.put((sentence, response_id, segment_id))
                     await out.put(ReplyDeltaEvent(
                         turn_id=self.turn_id, text=delta,
                         response_id=response_id, segment_id=segment_id,
                     ))
                 elif kind == "segment.completed":
-                    if sentence := segment_text.get(segment_id, "").strip():
+                    if sentence := segment_text.pop(segment_id, "").strip():
                         await sentences.put((sentence, response_id, segment_id))
                 elif kind == "response.interrupted":
                     raise _Cancelled

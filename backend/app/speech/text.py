@@ -2,7 +2,7 @@
 
 import re
 
-SENTENCE_END = re.compile(r"(?<=[.!?…])\s+")
+SENTENCE_END = re.compile(r"(?<=[.!?…:;])\s+")  # «:»/«;» — раньше первый звук
 
 
 def split_sentences(text: str) -> list[str]:

@@ -157,14 +157,16 @@ def test_call_sse_preserves_frontend_uuid_and_turn_with_live_kernel_background(m
             audio = [item for item in received if item["type"] == "audio"]
             rid = deltas[0]["response_id"]
             assert rid and {item["response_id"] for item in deltas + audio} == {rid}
-            assert len(audio) == 2
-            assert {item["segment_id"] for item in audio} == {
+            # TTS по предложениям: на сегмент одно или несколько аудио
+            segments = list(dict.fromkeys(item["segment_id"] for item in audio))
+            assert len(segments) == 2
+            assert set(segments) == {
                 item["segment_id"] for item in deltas
             }
             ack = await client.post(f"/calls/{sid}/turns/1/playback", json={
                 "response_id": rid, "played_ms": 150, "segments": [
-                    {"segment_id": item["segment_id"], "start_ms": i * 100,
-                     "end_ms": (i + 1) * 100} for i, item in enumerate(audio)
+                    {"segment_id": segment_id, "start_ms": i * 100,
+                     "end_ms": (i + 1) * 100} for i, segment_id in enumerate(segments)
                 ],
             })
             assert ack.status_code == 204
