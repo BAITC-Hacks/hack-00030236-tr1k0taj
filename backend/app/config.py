@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     kernel_response_timeout: float = Field(default=60, ge=1, le=180)
     kernel_background_parallelism: int = Field(default=3, ge=1, le=8)
     kernel_global_parallelism: int = Field(default=8, ge=2, le=64)
+    kernel_tool_cache_ttl: float = Field(default=300, ge=0, le=3600)
+    kernel_max_runs_per_turn: int = Field(default=8, ge=1, le=64)
+    kernel_max_runs_per_session: int = Field(default=64, ge=1, le=1024)
     # Starter kit (read-only mount in compose). Loaded into kit_records on startup if empty.
     datasets_dir: str = "/datasets"
     # Провайдеры этапов (ADR 0008). mock — запуск без ключей с понятными ошибками.
