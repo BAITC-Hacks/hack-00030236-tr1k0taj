@@ -1,7 +1,7 @@
 """Модуль call: HTTP звонка и оркестрация хода с потоковым ответом (docs/specs/call-api.md).
 
-Порты этапов (STT, роутер, исполнитель, ответ, TTS, фон) — в app.call.ports; реализации
-выбираются через env в build_providers.
+Порты этапов: STT/TTS — app.speech, исполнитель/ответ/фон — app.executor, роутер —
+app.call.ports (там же реэкспорт всех портов); реализации выбираются через env в build_providers.
 """
 
 from app.call.api import router as api_router
