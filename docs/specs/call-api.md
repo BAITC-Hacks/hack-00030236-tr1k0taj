@@ -27,6 +27,36 @@
 Streaming здесь означает поток **событий ответа** сервер → браузер. Распознавание речи остаётся push-to-talk
 (ADR 0008), партиалов ASR нет.
 
+### Подключение agent kernel
+
+`CallService(contexts, providers, kernel=None)` сохраняет UUID фронта, существующий `turn_id`
+и этапы STT → роутер всех сценариев → исполнитель. Для обычного `route` без handoff,
+системного намерения и действий с побочными эффектами kernel получает transcript,
+`ReplyBrief` (instruction/template/decision/facts/language), generation, context_version,
+client_id и необязательный `search_query` роутера. Повторный `begin_turn` не вызывается.
+Уточнения, ошибки роутера, неподдержанные действия и handoff сохраняют ответ исполнителя.
+Без настроенного роутера mock по-прежнему честно сообщает `llm_unavailable`.
+
+Kernel публикует клиенту только текст main: `response.delta` преобразуется в `reply.delta`,
+`response.completed` — в `reply.done`, `response.interrupted` — в `turn.cancelled`,
+ошибка — в fatal `error` без успешного `turn.done`. Служебные результаты и prompts не выходят
+в SSE. Несколько сегментов составляют один response_id; каждый завершённый сегмент получает
+отдельную TTS-задачу. `reply.delta` и `audio` имеют дополнительные nullable `response_id`
+и `segment_id`; `reply.done` имеет `response_id`. Старые поля и имена событий сохраняются.
+
+`cancel` дополнительно принимает необязательный JSON `{ "played_ms": 123 }`.
+Без позиции (включая обрыв fetch) услышанность остаётся unknown; main/TTS отменяются,
+актуальные фоновые задачи продолжаются. Reset/смена поколения отменяют весь старый kernel.
+
+`playback` сохраняет старые `eos_to_playback_ms` / `eos_to_reply_text_ms` и принимает
+`request_id?`, `response_id?`, `played_ms`, `segments[{segment_id,start_ms,end_ms}]`,
+`text_segment_ids[]`. EOS-замеры и позиция аудиодорожки имеют разный смысл: наличие первого
+не подтверждает прослушивание. Timeline/text acknowledgement требуют `played_ms`.
+Валидация принадлежности ответа, порядка интервалов и монотонного прогресса выполняется kernel.
+Без kernel расширенный playback получает 409; прежний замер браузера продолжает работать.
+Общий `/capabilities` сохраняет прежние поля и добавляет `kernel_enabled`, `kernel_streaming`,
+`kernel_background`, `kernel_playback`; подробный контракт ядра — `/kernel/capabilities`.
+
 ## Контракт
 
 | Метод | Путь | Что |

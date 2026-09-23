@@ -21,6 +21,7 @@ EntryType = Literal[
     "turn",  # отмена хода кнопкой «стоп»
     "trace",
     "error",
+    "kernel",  # runtime envelopes; internal ones are excluded from the public board
 ]
 Origin = Literal["foreground", "background"]
 
@@ -69,6 +70,8 @@ class SessionContext(BaseModel):
     history: list[Turn] = []
     low_confidence_streak: int = 0
     cancelled_turns: list[int] = []
+    # Runtime projection is persisted by ContextStore, never serialized into public /context.
+    kernel: dict[str, Any] = Field(default_factory=dict, exclude=True, repr=False)
 
 
 class BoardEntry(BaseModel):

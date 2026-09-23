@@ -2,7 +2,7 @@ from datetime import datetime
 
 from sqlalchemy import BigInteger, DateTime, Float, Integer, String, func
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, synonym
 
 from app.db import Base
 
@@ -11,6 +11,7 @@ class SessionRow(Base):
     __tablename__ = "sessions"
 
     session_id: Mapped[str] = mapped_column(String, primary_key=True)
+    id = synonym("session_id")  # compatibility for former kernel repository cleanup clients
     generation: Mapped[int] = mapped_column(Integer)
     context_version: Mapped[int] = mapped_column(Integer)
     state: Mapped[dict] = mapped_column(JSONB)

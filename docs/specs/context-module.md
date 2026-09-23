@@ -23,9 +23,21 @@ backend/app/context/
   api.py        # GET /sessions/{id}/context, /sessions/{id}/board
 ```
 
-Источник истины — память процесса (один процесс, ADR 0003). Каждое изменение под lock'ом сессии
+Рабочий кеш — память процесса (один процесс, ADR 0003), сохранённый снимок читается через `load`.
+Каждое изменение под lock'ом сессии
 пишется в Postgres одной транзакцией: upsert `sessions` + insert `board_entries`.
-Перезапуск завершает звонок, восстановление не делаем.
+Перезапуск завершает активную генерацию; сохранённые история и журнал доступны для чтения.
+
+Agent kernel использует те же `sessions`/`board_entries`, без отдельных таблиц сессий:
+`SessionContext.kernel` хранит его runtime projection и исключён из публичной сериализации
+`/context`. `Contexts.kernel_create/get/change/events/open_sessions` — единственный путь
+его чтения и атомарных изменений; `Repository` ядра является адаптером этих методов.
+События хранятся как `BoardEntry(type="kernel", payload=envelope)`; envelope содержит
+монотонный `seq`, generation и visibility. `/board` скрывает внутренние kernel-события,
+а SSE использует отдельный отфильтрованный replay. Runtime-изменения не повышают
+доменный `context_version`; актуальность фона проверяется по generation/input_revision.
+Reset очищает projection, повышает generation и сохраняет монотонность курсора.
+История bot сама по себе не подтверждает доставку: playback определяется только ACK ядра.
 
 Типы `Fact`, `BoardEntry`, `ContextPatch` принадлежат `context`. `add_facts` и `ContextPatch` принимают и `knowledge.Fact` (те же поля).
 
@@ -97,7 +109,7 @@ handoff_summary(snap)             # dict с контекстом для опер
 
 ## Вне скоупа
 Реестр `asyncio.Task` фонового помощника (зона C, через `on_reset` и `generation`),
-восстановление после рестарта, несколько процессов, редактирование доски.
+возобновление активной генерации после рестарта, несколько процессов, редактирование доски.
 
 ## Ключевые тесты
 `backend/tests/test_context.py` на `MemoryStore`, без БД и LLM: версии, откат, патчи, подтверждения,

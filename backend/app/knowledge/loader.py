@@ -127,6 +127,9 @@ async def load_kit(session: AsyncSession, datasets_dir: Path, *, reset: bool = F
     )
     await session.execute(stmt)
     await session.commit()
+    from app.knowledge.rag import schedule_reindex
+
+    schedule_reindex(session.bind)
     return len(rows)
 
 

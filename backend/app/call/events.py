@@ -67,6 +67,8 @@ class ReplyDeltaEvent(_Event):
 
     type: Literal["reply.delta"] = "reply.delta"
     text: str
+    response_id: str | None = None
+    segment_id: str | None = None
 
 
 class ReplyDoneEvent(_Event):
@@ -75,6 +77,7 @@ class ReplyDoneEvent(_Event):
     type: Literal["reply.done"] = "reply.done"
     text: str
     language: str
+    response_id: str | None = None
 
 
 class AudioEvent(_Event):
@@ -85,6 +88,8 @@ class AudioEvent(_Event):
     mime: str
     data: str = Field(description="Аудио предложения, base64")
     text: str = Field(description="Озвученное предложение")
+    response_id: str | None = None
+    segment_id: str | None = None
 
 
 class ErrorEvent(_Event):

@@ -60,6 +60,10 @@ class Store:
         await self.session.execute(stmt)
         if commit:
             await self.session.commit()
+            if kind in ("kb", "office", "clinic", "inspection_point"):
+                from app.knowledge.rag import schedule_reindex
+
+                schedule_reindex(self.session.bind)
 
     async def delete(self, kind: str, key: str) -> bool:
         result = await self.session.execute(

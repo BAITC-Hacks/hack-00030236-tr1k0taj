@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 # Models imported so autogenerate sees them. Add new model modules here.
 import app.context.models
+import app.kernel.models
 import app.knowledge.models  # noqa: F401
 from app.config import settings
 from app.db import Base

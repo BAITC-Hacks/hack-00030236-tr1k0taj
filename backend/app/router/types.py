@@ -24,6 +24,10 @@ class RouterOutput(BaseModel):
     language: Language
     slots: dict[str, Any] = {}
     is_continuation: bool = False
+    search_query: str | None = Field(
+        default=None, max_length=1000,
+        description="English retrieval query from the same routing call; never filters scenarios",
+    )
 
     def unknown_ids(self, known: set[str]) -> list[str]:
         """ID, которых нет в каталоге. Непустой список — ошибка, а не «похожий» сценарий."""

@@ -4,8 +4,8 @@ plus pg_trgm word similarity (catches ru/kk morphology: 'өтінішім' ~ 'ө
 Scenario hits are HINTS for trace/debug only. The router always receives the full catalog;
 search results must never narrow it (spec 5.5, README kit: no intent classifiers).
 
-KB, offices and clinics are in English. Callers pass kit vocabulary (normalized slot values,
-a KB topic from topics()); cross-lingual search on raw ru/kk text is phase 2 (embeddings).
+query() preserves this lexical API. rag_query() adds cross-lingual embeddings over public
+documents only, rank fusion, source IDs and explicit metadata when lexical fallback is used.
 """
 
 import re
@@ -41,7 +41,34 @@ class Search:
     def __init__(self, store: Store):
         self._store = store
 
-    async def query(self, q: str, kinds: list[str] | None = None, limit: int = 5) -> list[Hit]:
+    async def read(self, kind: str, key: str) -> Fact | None:
+        """Exact public document only. Unlike kb_lookup, never substitutes a search result."""
+        from app.knowledge.rag import document_kinds
+
+        document_kinds([kind])
+        value = await self._store.get(kind, key)
+        if value is None:
+            return None
+        return Fact(key=f"{kind}.{key}", value=value, source="knowledge", source_id=f"{kind}:{key}")
+
+    async def rag_query(
+        self, q: str, kinds: list[str] | None = None, limit: int = 3,
+        *, search_query: str | None = None,
+    ) -> dict:
+        from app.knowledge.rag import RagIndex
+
+        return await RagIndex(self._store.session.bind).query(
+            q, kinds, limit, search_query=search_query,
+        )
+
+    async def reindex(self, batch_size: int = 64) -> dict:
+        from app.knowledge.rag import RagIndex
+
+        return await RagIndex(self._store.session.bind).reindex(batch_size)
+
+    async def query(
+        self, q: str, kinds: list[str] | None = None, limit: int = 5
+    ) -> list[Hit]:
         tsq = _tsquery(q)
         if not tsq:
             return []

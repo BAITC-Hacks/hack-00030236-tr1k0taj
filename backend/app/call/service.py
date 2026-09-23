@@ -10,6 +10,7 @@ import re
 import time
 from collections import defaultdict
 from collections.abc import AsyncIterator
+from contextlib import aclosing, suppress
 from typing import Any
 
 import anyio
@@ -58,9 +59,11 @@ class _Cancelled(Exception):
 
 
 class CallService:
-    def __init__(self, contexts: Contexts, providers: Providers) -> None:
+    def __init__(self, contexts: Contexts, providers: Providers, kernel=None) -> None:
         self.contexts = contexts
         self.providers = providers
+        self.kernel = kernel
+        self._speech_tasks: dict[tuple[str, int], asyncio.Task] = {}
         self._locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self.last_router: dict[str, RouterResult] = {}
         self._opening = asyncio.Lock()
@@ -75,6 +78,13 @@ class CallService:
 
     def busy(self, session_id: str) -> bool:
         return self._locks[session_id].locked()
+
+    async def cancel_turn(self, session_id: str, turn_id: int, played_ms: int | None = None):
+        await self.contexts.cancel_turn(session_id, turn_id)
+        if self.kernel is not None:
+            await self.kernel.interrupt_turn(session_id, turn_id, played_ms)
+        if task := self._speech_tasks.get((session_id, turn_id)):
+            task.cancel()
 
     async def run_turn(
         self,
@@ -100,7 +110,7 @@ class CallService:
                 if not turn.finished and turn.turn_id:
                     # клиент оборвал поток: ход неактуален, поздние события не нужны
                     with anyio.CancelScope(shield=True):
-                        await self.contexts.cancel_turn(session_id, turn.turn_id)
+                        await self.cancel_turn(session_id, turn.turn_id)
 
 
 class _Turn:
@@ -229,16 +239,35 @@ class _Turn:
                 if execution.facts:
                     yield FactsEvent(turn_id=self.turn_id, facts=execution.facts)
 
+            # Preserve explicit system/clarification/handoff/action replies from the executor.
+            use_kernel = (
+                self.svc.kernel is not None
+                and self.decision is not None
+                and self.decision.kind == "route"
+                and execution.brief.decision == "route"
+                and not (execution.brief.scenario_id or "").startswith("SYS_")
+                and execution.brief.handoff is None
+                and all(action.mode == "read" for action in execution.actions)
+            )
             # факты хода зафиксированы как vN — фон стартует от этого снимка (ADR 0006)
-            self.p.background.schedule(await self.ctx.snapshot(self.sid), self.turn_id)
+            if not use_kernel:
+                self.p.background.schedule(await self.ctx.snapshot(self.sid), self.turn_id)
 
             # --- ответ и TTS ------------------------------------------------------
             reply = ""
-            async for event in self._speak(execution.brief):
-                self._alive()
-                if isinstance(event, ReplyDoneEvent):
-                    reply = event.text
-                yield event
+            async with aclosing(self._speak(execution.brief, tr.text, use_kernel)) as speech:
+                async for event in speech:
+                    self._alive()
+                    if isinstance(event, TurnCancelledEvent) or (
+                        isinstance(event, ErrorEvent) and event.fatal
+                    ):
+                        self.finished = True
+                        yield event
+                        return
+                    if isinstance(event, ReplyDoneEvent):
+                        reply = event.text
+                    yield event
+            self._alive()
             await self.ctx.add_reply(self.sid, self.turn_id, reply, execution.brief.language)
 
             if self.latency.total is None:  # без TTS: до reply.done; с TTS задано первым аудио
@@ -300,13 +329,18 @@ class _Turn:
             )
         )
 
-    async def _speak(self, brief: ReplyBrief) -> AsyncIterator[BaseModel]:
+    async def _speak(
+        self, brief: ReplyBrief, transcript: str = "", use_kernel: bool = False
+    ) -> AsyncIterator[BaseModel]:
         """Текст кусками + TTS по предложениям параллельно. Порядок аудио сохраняется."""
         out: asyncio.Queue = asyncio.Queue()
         sentences: asyncio.Queue = asyncio.Queue()
         t = time.perf_counter()
 
         async def text_producer() -> None:
+            if use_kernel:
+                await kernel_text_producer()
+                return
             full, buf, first = "", "", True
             async for delta in self.p.responder.stream(brief):
                 if first:
@@ -316,17 +350,73 @@ class _Turn:
                 buf += delta
                 *done, buf = _SENTENCE_END.split(buf)
                 for s in done:
-                    await sentences.put(s)
+                    await sentences.put((s, None, None))
                 await out.put(ReplyDeltaEvent(turn_id=self.turn_id, text=delta))
             if buf.strip():
-                await sentences.put(buf)
+                await sentences.put((buf, None, None))
             await sentences.put(None)
             self.latency.response = self._stage("response", t)
             await out.put(ReplyDoneEvent(turn_id=self.turn_id, text=full, language=brief.language))
 
+        async def kernel_text_producer() -> None:
+            full, first, response_id = "", True, None
+            segment_text: dict[str, str] = {}
+            snapshot = await self.ctx.snapshot(self.sid)
+            context = brief.model_dump(mode="json") | {
+                "generation": snapshot.generation,
+                "context_version": snapshot.context_version,
+                "client_id": snapshot.client_id,
+                "search_query": getattr(self.router_out, "search_query", None),
+            }
+            completed = False
+            async for envelope in self.svc.kernel.stream_turn(
+                self.sid, self.turn_id, transcript, context
+            ):
+                self._alive()
+                kind, payload = envelope["type"], envelope.get("payload", {})
+                response_id = envelope.get("response_id") or response_id
+                segment_id = envelope.get("segment_id")
+                if kind == "response.delta":
+                    delta = payload["text"]
+                    if first:
+                        self.latency.response_first_token = _ms(t)
+                        first = False
+                    full += delta
+                    if segment_id:
+                        segment_text[segment_id] = segment_text.get(segment_id, "") + delta
+                    await out.put(ReplyDeltaEvent(
+                        turn_id=self.turn_id, text=delta,
+                        response_id=response_id, segment_id=segment_id,
+                    ))
+                elif kind == "segment.completed":
+                    if sentence := segment_text.get(segment_id, "").strip():
+                        await sentences.put((sentence, response_id, segment_id))
+                elif kind == "response.interrupted":
+                    raise _Cancelled
+                elif kind == "response.failed":
+                    raise ProviderUnavailable(
+                        "responder", payload.get("code", "generation_failed"),
+                        payload.get("message", "Не удалось завершить ответ."),
+                    )
+                elif kind == "response.completed":
+                    completed = True
+                    break
+                # Internal events and control metadata never enter the client text.
+            if not completed:
+                raise ProviderUnavailable(
+                    "responder", "stream_incomplete", "Поток ответа завершился преждевременно."
+                )
+            await sentences.put(None)
+            self.latency.response = self._stage("response", t)
+            await out.put(ReplyDoneEvent(
+                turn_id=self.turn_id, text=full, language=brief.language,
+                response_id=response_id,
+            ))
+
         async def audio_producer() -> None:
             seq = 0
-            while (sentence := await sentences.get()) is not None:
+            while (job := await sentences.get()) is not None:
+                sentence, response_id, segment_id = job
                 try:
                     chunk = await self.p.tts.synthesize(sentence.strip(), brief.language)
                 except Exception as e:  # noqa: BLE001
@@ -344,6 +434,8 @@ class _Turn:
                         mime=chunk.mime,
                         data=base64.b64encode(chunk.data).decode(),
                         text=sentence.strip(),
+                        response_id=response_id,
+                        segment_id=segment_id,
                     )
                 )
                 seq += 1
@@ -353,24 +445,39 @@ class _Turn:
                 async with asyncio.TaskGroup() as tg:
                     tg.create_task(text_producer())
                     tg.create_task(audio_producer())
+            except* _Cancelled:
+                await out.put(TurnCancelledEvent(turn_id=self.turn_id))
             except* Exception as eg:  # noqa: BLE001 — ошибка ответа не роняет звонок
+                error = eg.exceptions[0]
                 await out.put(
                     ErrorEvent(
                         turn_id=self.turn_id,
                         stage="responder",
-                        code="responder_failed",
-                        message=str(eg.exceptions[0]),
+                        code=error.code if isinstance(error, ProviderUnavailable)
+                        else "responder_failed",
+                        message=error.message if isinstance(error, ProviderUnavailable)
+                        else "Не удалось завершить ответ.",
                         fatal=True,
                     )
                 )
-            await out.put(None)
+            finally:
+                await out.put(None)
 
         task = asyncio.create_task(run_all())
+        self.svc._speech_tasks[(self.sid, self.turn_id)] = task
+        finished = False
         try:
             while (event := await out.get()) is not None:
                 yield event
+            finished = True
         finally:
             task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+            self.svc._speech_tasks.pop((self.sid, self.turn_id), None)
+            if not finished and not self.finished and use_kernel:
+                with anyio.CancelScope(shield=True):
+                    await self.svc.kernel.interrupt_turn(self.sid, self.turn_id, None)
 
     async def _done(self, tr: Transcript, reply: str) -> TurnDoneEvent:
         snap = await self.ctx.snapshot(self.sid)

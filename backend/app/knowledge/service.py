@@ -9,6 +9,7 @@ from app.knowledge.loader import load_kit
 from app.knowledge.records import Records
 from app.knowledge.search import Search
 from app.knowledge.store import Store
+from app.knowledge.types import Fact
 
 
 class Knowledge:
@@ -19,6 +20,9 @@ class Knowledge:
         self.catalog = Catalog(self.store)
         self.records = Records(self.store)
         self.search = Search(self.store)
+
+    async def read(self, kind: str, key: str) -> Fact | None:
+        return await self.search.read(kind, key)
 
     async def reload(self, *, reset: bool = True) -> int:
         from app.config import settings

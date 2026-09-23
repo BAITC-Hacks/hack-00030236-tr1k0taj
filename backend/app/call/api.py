@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Path, Request, Response, UploadFile
 from fastapi.sse import EventSourceResponse, ServerSentEvent
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.call.events import TurnEvent
 from app.call.ports import Providers
@@ -99,6 +99,10 @@ class Capabilities(BaseModel):
     languages: list[str] = ["ru", "kk", "mixed"]
     audio_input: list[str] = ["audio/webm", "audio/ogg", "audio/wav"]
     dataset_today: str
+    kernel_enabled: bool = False
+    kernel_streaming: bool = False
+    kernel_background: bool = False
+    kernel_playback: str | None = None
 
 
 class StartCall(BaseModel):
@@ -132,13 +136,43 @@ class AudioTurn(BaseModel):
     )
 
 
+class PlaybackSegment(BaseModel):
+    segment_id: UUID
+    start_ms: int = Field(ge=0, le=3600000)
+    end_ms: int = Field(gt=0, le=3600000)
+
+    @model_validator(mode="after")
+    def positive_interval(self):
+        if self.end_ms <= self.start_ms:
+            raise ValueError("end_ms must be greater than start_ms")
+        return self
+
+
+class CancelTurn(BaseModel):
+    played_ms: int | None = Field(None, ge=0, le=3600000)
+
+
 class Playback(BaseModel):
-    eos_to_playback_ms: int = Field(
-        ge=0, description="Браузер: конец речи клиента → начало воспроизведения ответа"
+    eos_to_playback_ms: int | None = Field(
+        None, ge=0, description="Браузер: конец речи клиента → начало воспроизведения ответа"
     )
     eos_to_reply_text_ms: int | None = Field(
         None, ge=0, description="Браузер: конец речи → появление текста ответа"
     )
+    request_id: UUID | None = None
+    response_id: UUID | None = None
+    played_ms: int | None = Field(None, ge=0, le=3600000)
+    segments: list[PlaybackSegment] = Field(default_factory=list, max_length=16)
+    text_segment_ids: list[UUID] = Field(default_factory=list, max_length=16)
+
+    @model_validator(mode="after")
+    def has_measurement(self):
+        if self.played_ms is None and any((self.response_id, self.segments, self.text_segment_ids)):
+            raise ValueError("played_ms is required for response delivery feedback")
+        if self.eos_to_playback_ms is None and self.eos_to_reply_text_ms is None \
+                and self.played_ms is None:
+            raise ValueError("playback requires a timing measurement or played_ms")
+        return self
 
 
 class RouterDebug(BaseModel):
@@ -148,19 +182,23 @@ class RouterDebug(BaseModel):
     result: RouterResult | None
 
 
-def capabilities(p: Providers) -> Capabilities:
+def capabilities(p: Providers, kernel=None) -> Capabilities:
     return Capabilities(
         mock_mode=p.mock_mode,
         providers={
             "stt": p.stt.name,
             "llm": p.router.name,
             "executor": p.executor.name,
-            "responder": p.responder.name,
+            "responder": "kernel" if kernel is not None else p.responder.name,
             "tts": p.tts.name,
-            "background": p.background.name,
+            "background": "kernel" if kernel is not None else p.background.name,
         },
         supported_actions=p.executor.supported_actions,
         dataset_today=DATASET_TODAY.isoformat(),
+        kernel_enabled=kernel is not None,
+        kernel_streaming=kernel is not None,
+        kernel_background=kernel is not None,
+        kernel_playback="segment-timeline-v1" if kernel is not None else None,
     )
 
 
@@ -169,7 +207,7 @@ def capabilities(p: Providers) -> Capabilities:
 
 @router.get("/capabilities", summary="Что умеет backend сейчас")
 async def get_capabilities(calls: Calls) -> Capabilities:
-    return capabilities(calls.providers)
+    return capabilities(calls.providers, calls.kernel)
 
 
 @router.post(
@@ -189,7 +227,8 @@ async def start_call(
     if not created:
         response.status_code = 200
     return CallStarted(
-        session_id=sid, created=created, context=ctx, capabilities=capabilities(calls.providers)
+        session_id=sid, created=created, context=ctx,
+        capabilities=capabilities(calls.providers, calls.kernel),
     )
 
 
@@ -255,8 +294,10 @@ async def audio_turn(
     "Обрыв fetch на клиенте тоже отменяет ход.",
     responses=NOT_FOUND,
 )
-async def cancel_turn(session_id: Session, turn_id: TurnId, calls: Calls) -> None:
-    await calls.contexts.cancel_turn(session_id, turn_id)
+async def cancel_turn(
+    session_id: Session, turn_id: TurnId, calls: Calls, body: CancelTurn | None = None
+) -> None:
+    await calls.cancel_turn(session_id, turn_id, body.played_ms if body else None)
 
 
 @router.post(
@@ -270,9 +311,18 @@ async def cancel_turn(session_id: Session, turn_id: TurnId, calls: Calls) -> Non
 async def report_playback(
     session_id: Session, turn_id: TurnId, body: Playback, calls: Calls
 ) -> None:
-    await calls.contexts.log(
-        session_id, turn_id, "timing", "user", {"stage": "browser", **body.model_dump()}
-    )
+    if body.played_ms is not None:
+        if calls.kernel is None:
+            raise HTTPException(409, "kernel_playback_unavailable")
+        await calls.kernel.playback_turn(
+            session_id, turn_id, body.model_dump(mode="json", exclude_none=True)
+        )
+    timing = body.model_dump(include={"eos_to_playback_ms", "eos_to_reply_text_ms"},
+                             exclude_none=True)
+    if timing:
+        await calls.contexts.log(
+            session_id, turn_id, "timing", "user", {"stage": "browser", **timing}
+        )
 
 
 @router.get(

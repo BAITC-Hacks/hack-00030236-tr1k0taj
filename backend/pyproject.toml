@@ -10,6 +10,7 @@ dependencies = [
     "sqlalchemy[asyncio]",
     "asyncpg",
     "alembic",
+    "openai>=2,<3",
     "python-multipart>=0.0.32",
 ]
 

@@ -5,6 +5,7 @@
 
 from app.context.api import get_contexts
 from app.context.api import router as api_router
+from app.context.models import SessionRow as SessionRecord
 from app.context.mutation import Mutation
 from app.context.service import Contexts
 from app.context.store import ContextStore, MemoryStore, PgStore
@@ -33,6 +34,7 @@ __all__ = [
     "PgStore",
     "SessionContext",
     "SessionNotFound",
+    "SessionRecord",
     "Turn",
     "api_router",
     "get_contexts",
