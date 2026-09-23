@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     # Offline only: generates ru/kk search expansions (`just expand-kb`), not used at runtime.
     expansion_model: str = "gpt-5.5"
     kernel_max_segments: int = Field(default=4, ge=1, le=16)
+    kernel_max_segments_voice: int = Field(default=2, ge=1, le=8)
     kernel_response_timeout: float = Field(default=60, ge=1, le=180)
     kernel_background_parallelism: int = Field(default=3, ge=1, le=8)
     kernel_global_parallelism: int = Field(default=8, ge=2, le=64)
