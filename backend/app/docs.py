@@ -52,7 +52,8 @@ for (;;) {
 Фронт может прислать W3C-заголовок `traceparent` — сервер продолжит его трассу. Каждый ответ
 возвращает `traceparent` и `x-trace-id`; `turn.done` несёт тот же `trace_id`. Дерево хода
 (сервер → `turn` → `stt` → `router` → `executor` → `responder` → `segment` → `tts.sentence`) —
-`GET /traces/{trace_id}`, трассы звонка — `GET /traces?session_id=<uuid>`. Замеры `playback`
+`GET /traces/{trace_id}`, трассы звонка — `GET /traces?session_id=<uuid>`, история звонков —
+`GET /traces/sessions`, сквозная трасса звонка — `GET /traces/sessions/{session_id}`. Замеры `playback`
 и `cancel` фронт шлёт с `traceparent` хода, чтобы они легли в ту же трассу.
 
 ### Режим без ключей
@@ -89,8 +90,8 @@ TAGS = [
     {
         "name": "trace",
         "description": "Трассы хода в формате OpenTelemetry для панели: дерево span'ов с "
-        "таймингами, решением роутера, чтениями и ошибками. Хранятся в памяти процесса "
-        "(после рестарта пусто), при `OTEL_EXPORTER_OTLP_ENDPOINT` уходят и по OTLP. "
+        "таймингами, решением роутера, чтениями, SQL и токенами. Хранятся в Postgres "
+        "(`trace_spans`) по UUID сессии, при `OTEL_EXPORTER_OTLP_ENDPOINT` уходят и по OTLP. "
         "Спека: `docs/specs/tracer-module.md`.",
     },
     {"name": "health", "description": "Проверка, что backend и БД живы."},

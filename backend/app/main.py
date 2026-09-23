@@ -15,12 +15,12 @@ from app.docs import DESCRIPTION, TAGS
 from app.kernel import KernelError, ModelDriver, Repository, Runtime
 from app.knowledge import ensure_loaded, schedule_reindex_knowledge, stop_reindex_knowledge
 
-# до создания app: span'ы middleware и lifespan пишутся в настроенный провайдер (ADR 0013)
-tracer.setup_tracing()
-
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
+    tracer.setup_tracing()  # идемпотентно; OTEL_* из env (ADR 0013)
+    tracer.instrument_sqlalchemy(engine)  # SQL → span'ы db.query, до первых запросов
+    await tracer.start_persistence(SessionLocal)  # span'ы звонков пишутся в trace_spans
     async with SessionLocal() as session:
         await ensure_loaded(session, Path(settings.datasets_dir))
     contexts = context.Contexts(context.PgStore())
@@ -37,6 +37,7 @@ async def lifespan(application: FastAPI):
     finally:
         await kernel.shutdown()
         await stop_reindex_knowledge()
+        await tracer.stop_persistence()  # до engine.dispose(): досбросить очередь span'ов
         await engine.dispose()
 
 

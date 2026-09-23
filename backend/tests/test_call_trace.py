@@ -60,7 +60,9 @@ def test_text_turn_trace_nests_stages_under_server_span():
 
         spans = list(_flatten(trace["spans"]))
         # задачи kernel/TTS не утекли в чужой контекст: все span'ы — в этой трассе и с сессией
-        assert all(s["attributes"].get("session.id") == sid for s in spans)
+        assert all(s["attributes"].get("session.id") == sid for s in spans
+                   if s["name"] != "db.query")  # SQL-span'ы привязываются к сессии по трассе
+        assert all(s["session_id"] == sid for s in spans)
         names = {s["name"] for s in spans}
         assert "segment" in names  # kernel-ответ вложен под responder
 
@@ -70,3 +72,8 @@ def test_text_turn_trace_nests_stages_under_server_span():
         for other in set(found) - {trace_id}:
             (run,) = client.get(f"/traces/{other}").json()["spans"]
             assert run["name"] == "agent.run" and run["links"][0]["trace_id"] == trace_id
+
+        call = client.get(f"/traces/sessions/{sid}").json()
+        (turn_view,) = [t for t in call["turns"] if t["trace_id"] == trace_id]
+        assert turn_view["router"]["scenario_id"] == "SC17"
+        assert {"router", "executor", "responder"} <= set(turn_view["stages"])
