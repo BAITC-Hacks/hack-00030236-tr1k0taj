@@ -8,6 +8,7 @@ from typing import ClassVar
 
 from app.context import SessionContext, handoff_summary
 from app.executor.ports import ActionCall, Execution, ReplyBrief, ReplyLanguage, TurnInput
+from app.executor.titles import title
 from app.knowledge import Fact, Knowledge
 
 READ_ACTIONS = ("find_client", "get_claim", "kb_lookup", "get_offices", "check_payment")
@@ -45,7 +46,7 @@ class BaselineExecutor:
             unclear = next(
                 i for i in await turn.kb.catalog.system_intents() if i.id == "SYS_UNCLEAR"
             )
-            names = [await self._name(turn.kb, i) for i in d.clarify_options]
+            names = [title(i, lang) or await self._name(turn.kb, i) for i in d.clarify_options]
             names += ["что-то другое" if lang == "ru" else "басқа нәрсе"] * (2 - len(names))
             template = unclear.response[lang].format(option_a=names[0], option_b=names[1])
             return Execution(
