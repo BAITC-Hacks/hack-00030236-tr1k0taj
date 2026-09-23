@@ -2,15 +2,23 @@
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol
+from typing import Annotated, Any, Literal, Protocol
 
-from pydantic import BaseModel
+from pydantic import BaseModel, BeforeValidator
 
 from app.context import Contexts, Fact, SessionContext
 from app.knowledge import Knowledge
 from app.router import Decision, RouterOutput
 
 ReplyLanguage = Literal["ru", "kk"]
+
+
+def _as_fact(value: Any) -> Any:
+    """knowledge.Fact и context.Fact — разные классы с одинаковыми полями: принимаем оба."""
+    return value.model_dump() if isinstance(value, BaseModel) and not isinstance(value, Fact) else value
+
+
+SourcedFact = Annotated[Fact, BeforeValidator(_as_fact)]
 ActionMode = Literal["read", "preview", "execute", "handoff", "unsupported"]
 
 
@@ -33,13 +41,13 @@ class ReplyBrief(BaseModel):
     decision: str | None = None
     instruction: str  # что сказать по смыслу, для LLM
     template: str | None = None  # ориентир из responses кита / системных намерений
-    facts: list[Fact] = []
+    facts: list[SourcedFact] = []
     handoff: dict[str, Any] | None = None
 
 
 class Execution(BaseModel):
     actions: list[ActionCall] = []
-    facts: list[Fact] = []
+    facts: list[SourcedFact] = []
     brief: ReplyBrief
 
 
