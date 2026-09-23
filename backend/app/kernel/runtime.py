@@ -12,8 +12,15 @@ from app.config import settings
 from app.kernel.context import package, snapshot
 from app.kernel.provider import ProviderError
 from app.kernel.store import KernelError, Repository, event
+from app.kernel.types import (
+    CreateSession,
+    InterruptRequest,
+    PlaybackRequest,
+    RAGReadArgs,
+    RAGSearchArgs,
+    TurnRequest,
+)
 from app.knowledge import open_knowledge
-from app.schemas.kernel import RAGReadArgs, RAGSearchArgs
 
 log = logging.getLogger(__name__)
 
@@ -55,6 +62,107 @@ class Runtime:
         self.global_semaphore = asyncio.Semaphore(settings.kernel_global_parallelism)
         # Reserve model capacity for foreground work even when many sessions have queued background work.
         self.background_capacity = asyncio.Semaphore(max(1, settings.kernel_global_parallelism - 1))
+        if hasattr(self.repo, "contexts"):
+            self.repo.contexts.on_reset(self.cancel_generation)
+
+    def cancel_generation(self, sid, generation):
+        """Contexts already committed the reset; cancel old work without awaiting under its lock."""
+        if task := self.main_tasks.get(sid):
+            task.cancel()
+        for task in self.background_tasks[sid].values():
+            task.cancel()
+        for key, task in list(self.tool_tasks.items()):
+            if key[0] == sid:
+                task.cancel()
+                self.tool_tasks.pop(key)
+        self.signals[sid].set()
+
+    async def stream_turn(self, sid, turn_id, transcript, brief):
+        """Use the existing call UUID/turn; stream only this response's public events."""
+        request = CreateSession()
+        state = await self.repo.create(
+            [a.model_dump() for a in request.agents], {},
+            "mock" if settings.mock_mode else "live", session_id=sid,
+        )
+        cursor = state["last_seq"]
+        accepted = await self.submit(
+            sid, TurnRequest(request_id=uuid4(), text=transcript),
+            turn_id=turn_id, brief=brief,
+        )
+        rid = accepted["response_id"]
+        try:
+            while True:
+                self.signals[sid].clear()
+                batch = await self.repo.events(sid, cursor)
+                for item in batch:
+                    cursor = item["seq"]
+                    if item.get("response_id") != rid:
+                        continue
+                    yield item
+                    if item["type"] in {
+                        "response.completed", "response.interrupted", "response.failed",
+                    }:
+                        return
+                if len(batch) == 200:
+                    continue
+                current = await self.repo.get(sid)
+                response = current["responses"].get(rid)
+                if current["status"] == "closed" or response is None:
+                    return
+                if response["status"] != "generating":
+                    # Drain all pages until the terminal event, even if a commit raced the query.
+                    continue
+                try:
+                    await asyncio.wait_for(self.signals[sid].wait(), 1)
+                except TimeoutError:
+                    pass
+        finally:
+            await self.interrupt_turn(sid, turn_id, generating_only=True)
+
+    async def interrupt_turn(self, sid, turn_id, played_ms=None, *, generating_only=False):
+        try:
+            state = await self.repo.get(sid)
+        except KernelError as exc:
+            if exc.status == 404:
+                return
+            raise
+        response = next((r for r in reversed(list(state["responses"].values()))
+                         if r["turn_id"] == turn_id), None)
+        if response is None or (generating_only and response["status"] != "generating"):
+            return
+        if played_ms is not None:
+            return await self.playback(sid, InterruptRequest(
+                request_id=uuid4(), response_id=response["response_id"], played_ms=played_ms,
+            ), interrupt=True)
+        async with self.locks[sid]:
+            def apply(state, seq):
+                saved = state["responses"].get(response["response_id"])
+                if saved is None or saved["status"] == "interrupted":
+                    return False, []
+                saved["status"] = "interrupted"
+                for segment in saved["segments"]:
+                    if segment["status"] == "generating":
+                        segment["status"] = "interrupted"
+                # A disconnect is not a playback acknowledgement: preserve unknown delivery.
+                return state["active_response_id"] == saved["response_id"], [event("response.interrupted", {"played_ms": saved["played_ms"]},
+                    author="user", public=True, response_id=saved["response_id"], turn_id=turn_id)]
+            cancel = await self._change(sid, apply)
+            if cancel and (task := self.main_tasks.get(sid)):
+                task.cancel()
+
+    async def playback_turn(self, sid, turn_id, body):
+        state = await self.repo.get(sid)
+        rid = body.get("response_id")
+        if rid is None:
+            rid = next((r["response_id"] for r in state["responses"].values()
+                        if r["turn_id"] == turn_id), None)
+        response = require_response(state, str(rid))
+        if response["turn_id"] != turn_id:
+            raise KernelError("response_not_found", "Ответ не принадлежит этому ходу", 404)
+        fields = {key: value for key, value in body.items() if key in PlaybackRequest.model_fields}
+        fields.setdefault("request_id", uuid4())
+        fields["response_id"] = response["response_id"]
+        return await self.playback(sid, PlaybackRequest.model_validate(fields))
 
     async def _change(self, sid, apply):
         result, events = await self.repo.change(sid, apply)
@@ -66,6 +174,7 @@ class Runtime:
         state = await self.repo.create(
             [a.model_dump() for a in request.agents], request.context,
             "mock" if settings.mock_mode else "live",
+            session_id=str(request.session_id) if request.session_id else None,
         )
         return snapshot(state)
 
@@ -73,7 +182,7 @@ class Runtime:
         for sid in await self.repo.open_sessions():
             await self.close_session(sid, "server_restart")
 
-    async def submit(self, sid, request):
+    async def submit(self, sid, request, *, turn_id=None, brief=None):
         payload = request.model_dump(mode="json")
         req_id, digest = str(request.request_id), request_key("turn", payload)
         async with self.locks[sid]:
@@ -81,6 +190,8 @@ class Runtime:
                 if prior := replay(state, req_id, digest):
                     return (prior["result"], False), []
                 require_open(state)
+                if brief is not None and brief.get("generation", state["generation"]) != state["generation"]:
+                    raise KernelError("stale_context", "Контекст звонка уже изменился")
                 if not settings.mock_mode and not settings.openai_api_key:
                     raise KernelError("provider_not_configured", "Не настроен OPENAI_API_KEY", 503)
                 active = state["responses"].get(state["active_response_id"], {})
@@ -89,8 +200,10 @@ class Runtime:
                 if len(state["messages"]) >= 100:
                     raise KernelError("session_limit", "Создайте новую сессию после 100 реплик")
                 state["input_revision"] += 1
-                turn, response_id = state["next_turn_id"], str(uuid4())
-                state["next_turn_id"] += 1
+                turn, response_id = turn_id or state["next_turn_id"], str(uuid4())
+                state["next_turn_id"] = turn + 1
+                if brief is not None:
+                    state["context"] = {"call_brief": brief}
                 state["active_response_id"] = response_id
                 state["messages"].append({"turn_id": turn, "text": request.text,
                                           "response_id": response_id})
@@ -346,7 +459,10 @@ class Runtime:
     async def _knowledge_tool(name, args):
         async with open_knowledge() as kb:
             if name == "rag_search":
-                return await kb.search.rag_query(args["query"], args["kinds"], args["limit"])
+                return await kb.search.rag_query(
+                    args["query"], args["kinds"], args["limit"],
+                    search_query=args.get("search_query"),
+                )
             fact = await kb.read(args["kind"], args["key"])
             return fact.model_dump() if fact else {"error": "not_found"}
 

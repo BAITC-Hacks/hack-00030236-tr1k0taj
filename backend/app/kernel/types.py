@@ -40,6 +40,7 @@ def default_agents() -> list[AgentSpec]:
 
 
 class CreateSession(Contract):
+    session_id: UUID | None = None
     agents: list[AgentSpec] = Field(default_factory=default_agents, max_length=8)
     context: dict[str, Any] = Field(default_factory=dict)
 
@@ -115,8 +116,9 @@ DocumentKind = Literal["kb", "office", "clinic", "inspection_point"]
 
 class RAGSearchArgs(Contract):
     query: str = Field(min_length=1, max_length=1000)
+    search_query: str | None = Field(default=None, min_length=1, max_length=1000)
     kinds: list[DocumentKind] = Field(default_factory=lambda: ["kb"], max_length=4)
-    limit: int = Field(default=5, ge=1, le=10)
+    limit: int = Field(default=3, ge=1, le=10)
 
 
 class RAGReadArgs(Contract):

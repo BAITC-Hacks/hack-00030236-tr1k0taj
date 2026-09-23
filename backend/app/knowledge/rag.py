@@ -121,13 +121,18 @@ class RagIndex:
         # Independent short sessions also allow a cancelled provider call to release every DB slot.
         self.sessions = async_sessionmaker(bind, expire_on_commit=False)
 
-    async def query(self, q: str, kinds: list[str] | None, limit: int) -> dict:
+    async def query(
+        self, q: str, kinds: list[str] | None, limit: int, *, search_query: str | None = None,
+    ) -> dict:
         from app.knowledge.search import Search
         from app.knowledge.store import Store
 
         started = asyncio.get_running_loop().time()
         kinds = document_kinds(kinds)
         q = q.strip()
+        semantic_query = (search_query or q).strip()
+        if not semantic_query or len(semantic_query) > MAX_QUERY_CHARS:
+            raise ValueError("Invalid semantic search query")
         if not q or len(q) > MAX_QUERY_CHARS or not 1 <= limit <= 20:
             raise ValueError("RAG query requires 1..4000 characters and limit 1..20")
         params = _parameters(kinds)
@@ -156,7 +161,7 @@ class RagIndex:
             elapsed = asyncio.get_running_loop().time() - started
             budget = max(0, settings.llm_timeout_seconds * 0.75 - elapsed)
             async with asyncio.timeout(budget):
-                vector = (await embed_texts([q]))[0]
+                vector = (await embed_texts([semantic_query]))[0]
         except (APIError, ValueError, TimeoutError):
             return {**fallback, "degraded_reason": "embedding_request_failed"}
         try:

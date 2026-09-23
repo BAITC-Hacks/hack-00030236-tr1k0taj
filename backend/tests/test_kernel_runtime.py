@@ -16,7 +16,7 @@ from app.kernel.models import KernelSession
 from app.kernel.provider import BackgroundResult, SegmentResult
 from app.kernel.runtime import Runtime
 from app.kernel.store import KernelError, Repository
-from app.schemas.kernel import (
+from app.kernel.types import (
     AgentSpec,
     CreateSession,
     InterruptRequest,
@@ -40,8 +40,8 @@ class ScopedRepository(Repository):
         super().__init__(sessions)
         self.ids = set()
 
-    async def create(self, *args):
-        state = await super().create(*args)
+    async def create(self, *args, **kwargs):
+        state = await super().create(*args, **kwargs)
         self.ids.add(state["session_id"])
         return state
 
@@ -317,5 +317,35 @@ def test_restart_closes_persisted_session_and_retains_partial_history():
             with pytest.raises(KernelError, match="Сессия завершена"):
                 await recovered.submit(sid, turn())
             await recovered.shutdown()
+
+    asyncio.run(run())
+
+
+def test_cancelling_old_call_turn_does_not_stop_new_response():
+    async def run():
+        class Controlled(Driver):
+            def __init__(self):
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def stream_segment(self, context, emit, tool):
+                if context["input_revision"] > 1:
+                    self.started.set()
+                    await self.release.wait()
+                return await super().stream_segment(context, emit, tool)
+
+        driver = Controlled()
+        async with kernel(driver) as runtime:
+            sid = (await runtime.create(CreateSession(agents=[])))["session_id"]
+            first = await runtime.submit(sid, turn())
+            await completed(runtime.main_tasks[sid])
+            second = await runtime.submit(sid, turn())
+            await driver.started.wait()
+            await runtime.interrupt_turn(sid, first["turn_id"])
+            assert not runtime.main_tasks[sid].cancelling()
+            driver.release.set()
+            await completed(runtime.main_tasks[sid])
+            state = await runtime.repo.get(sid)
+            assert state["responses"][second["response_id"]]["status"] == "completed"
 
     asyncio.run(run())

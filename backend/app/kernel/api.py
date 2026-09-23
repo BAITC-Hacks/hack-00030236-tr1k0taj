@@ -10,7 +10,7 @@ from app.config import settings
 from app.kernel.context import history, snapshot
 from app.kernel.runtime import Runtime
 from app.kernel.store import KernelError
-from app.schemas.kernel import (
+from app.kernel.types import (
     CreateSession,
     InterruptRequest,
     PlaybackRequest,
@@ -29,7 +29,7 @@ def runtime(request: Request) -> Runtime:
 Kernel = Annotated[Runtime, Depends(runtime)]
 
 
-@router.get("/capabilities")
+@router.get("/kernel/capabilities")
 async def capabilities():
     return {
         "protocol_version": 1, "mode": "mock" if settings.mock_mode else "live",

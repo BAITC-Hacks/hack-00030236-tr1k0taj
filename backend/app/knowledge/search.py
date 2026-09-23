@@ -51,10 +51,15 @@ class Search:
             return None
         return Fact(key=f"{kind}.{key}", value=value, source="knowledge", source_id=f"{kind}:{key}")
 
-    async def rag_query(self, q: str, kinds: list[str] | None = None, limit: int = 5) -> dict:
+    async def rag_query(
+        self, q: str, kinds: list[str] | None = None, limit: int = 3,
+        *, search_query: str | None = None,
+    ) -> dict:
         from app.knowledge.rag import RagIndex
 
-        return await RagIndex(self._store.session.bind).query(q, kinds, limit)
+        return await RagIndex(self._store.session.bind).query(
+            q, kinds, limit, search_query=search_query,
+        )
 
     async def reindex(self, batch_size: int = 64) -> dict:
         from app.knowledge.rag import RagIndex
@@ -72,7 +77,13 @@ class Search:
             {"q": q, "tsq": tsq, "kinds": kinds or SEARCHABLE_KINDS, "limit": limit},
         )
         return [
-            Hit(kind=r.kind, key=r.key, score=round(r.score, 4), snippet=r.snippet, payload=r.payload)
+            Hit(
+                kind=r.kind,
+                key=r.key,
+                score=round(r.score, 4),
+                snippet=r.snippet,
+                payload=r.payload,
+            )
             for r in rows
             if r.score >= MIN_SCORE
         ]

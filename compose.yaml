@@ -25,8 +25,11 @@ services:
       MOCK_MODE: ${MOCK_MODE:-true}
       LLM_MODEL: ${LLM_MODEL:-gpt-4.1-mini}
       EMBEDDINGS_ENABLED: ${EMBEDDINGS_ENABLED:-true}
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
-      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1536}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-large}
+      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-3072}
+      STT_PROVIDER: ${STT_PROVIDER:-mock}
+      LLM_PROVIDER: ${LLM_PROVIDER:-mock}
+      TTS_PROVIDER: ${TTS_PROVIDER:-mock}
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     volumes:

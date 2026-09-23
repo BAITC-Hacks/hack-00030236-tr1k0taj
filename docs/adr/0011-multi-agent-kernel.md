@@ -1,4 +1,4 @@
-# 0009. Streaming blackboard kernel и общий RAG
+# 0011. Streaming blackboard kernel и общий RAG
 
 - Статус: accepted
 - Дата: 2026-09-23

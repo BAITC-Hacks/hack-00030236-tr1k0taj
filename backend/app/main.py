@@ -8,12 +8,12 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import call, context
 from app.config import settings
 from app.db import SessionLocal, engine, get_session
+from app.docs import DESCRIPTION, TAGS
+from app.kernel import KernelError, ModelDriver, Repository, Runtime
 from app.kernel.api import router as kernel_router
-from app.kernel.provider import ModelDriver
-from app.kernel.runtime import Runtime
-from app.kernel.store import KernelError
 from app.knowledge import ensure_loaded, schedule_reindex_knowledge, stop_reindex_knowledge
 from app.knowledge.api import router as kit_router
 
@@ -22,9 +22,13 @@ from app.knowledge.api import router as kit_router
 async def lifespan(application: FastAPI):
     async with SessionLocal() as session:
         await ensure_loaded(session, Path(settings.datasets_dir))
+    contexts = context.Contexts(context.PgStore())
     kernel = Runtime(ModelDriver(api_key=settings.openai_api_key, model=settings.llm_model,
-                                 mock=settings.mock_mode, timeout=settings.llm_timeout_seconds))
+                                 mock=settings.mock_mode, timeout=settings.llm_timeout_seconds),
+                     repository=Repository(contexts=contexts))
+    application.state.contexts = contexts
     application.state.kernel = kernel
+    application.state.calls = call.CallService(contexts, call.build_providers(settings), kernel=kernel)
     await kernel.recover()
     schedule_reindex_knowledge()
     try:
@@ -35,7 +39,16 @@ async def lifespan(application: FastAPI):
         await engine.dispose()
 
 
-app = FastAPI(title="Voice Router API", lifespan=lifespan)
+app = FastAPI(
+    title="Voice Router API",
+    version="0.1.0",
+    summary="Голосовой роутер сценариев страховой Saqta Insurance",
+    description=DESCRIPTION,
+    openapi_tags=TAGS,
+    lifespan=lifespan,
+)
+app.include_router(call.api_router)
+app.include_router(context.api_router)
 app.include_router(kit_router)
 app.include_router(kernel_router)
 
@@ -54,7 +67,7 @@ class Health(BaseModel):
     db: str
 
 
-@app.get("/health")
+@app.get("/health", tags=["health"], summary="Backend и БД живы")
 async def health(session: Session) -> Health:
     await session.execute(text("SELECT 1"))
     return Health(status="ok", db="ok")

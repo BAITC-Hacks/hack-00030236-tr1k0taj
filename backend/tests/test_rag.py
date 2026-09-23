@@ -60,6 +60,8 @@ def test_hybrid_public_index_and_exact_read(embeddings):
                 assert first["key"] == "claims.submission"
                 assert first["source_id"] == "kb:claims.submission"
                 assert first["payload"]
+                await kb.search.rag_query("Құжатты қалай беремін?", ["kb"], search_query="claims.submission")
+                assert embeddings[-1] == ["claims.submission"]
                 exact = await kb.read("kb", first["key"])
                 assert exact.value == first["payload"]
                 # A prefix/fuzzy query must not be substituted for a missing exact document.

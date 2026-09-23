@@ -67,6 +67,8 @@ TOOLS = [
         "parameters": _object(
             {
                 "query": {"type": "string", "minLength": 1, "maxLength": 1000},
+                "search_query": {"type": ["string", "null"], "maxLength": 1000,
+                                 "description": "English translation for retrieval, or null"},
                 "kinds": {
                     "type": "array",
                     "items": {"type": "string", "enum": KINDS},
@@ -114,6 +116,9 @@ continue_response=true только если нужен ещё один соде
 Обязательные факты проверь инструментами ДО вывода текста. При вызове инструмента
 не выводи text в том же ответе API; после получения результата верни JSON.
 used_source_ids — отдельные идентификаторы источников использованных утверждений.
+context.call_brief — проверенное задание исполнителя: соблюдай instruction, decision,
+scenario_id и запреты действий. Его facts уже имеют источники. search_query — готовый
+английский запрос роутера; передавай его в rag_search, query сохраняй на языке клиента.
 """
 _BACKGROUND = _COMMON + """
 Ты внутренний фоновый исследователь; не отвечай клиенту напрямую.
@@ -169,7 +174,11 @@ def _validated_arguments(name: str, arguments: str, allowed: set[str]) -> dict:
     if not isinstance(args, dict):
         raise TypeError("invalid_tool_arguments")
     if name == "rag_search":
-        if set(args) != {"query", "kinds", "limit"}:
+        if set(args) not in ({"query", "kinds", "limit"},
+                            {"query", "kinds", "limit", "search_query"}):
+            raise ValueError("invalid_tool_arguments")
+        english = args.get("search_query")
+        if english is not None and (not isinstance(english, str) or not 1 <= len(english.strip()) <= 1000):
             raise ValueError("invalid_tool_arguments")
         if not isinstance(args["query"], str) or not 1 <= len(args["query"].strip()) <= 1000:
             raise ValueError("invalid_tool_arguments")
@@ -355,6 +364,7 @@ class ModelDriver:
             raise ProviderError("missing_api_key")
         known_sources = _source_ids(context.get("background", []))
         known_sources.update(_source_ids(context.get("sources", [])))
+        known_sources.update(_source_ids(context.get("context", {}).get("call_brief", {}).get("facts", [])))
         inputs = [{"role": "user", "content": json.dumps(_redact(context), ensure_ascii=False)}]
         filtered = _PrefixFilter(context.get("prefix", ""), emit) if emit else None
         async with asyncio.timeout(self.timeout):

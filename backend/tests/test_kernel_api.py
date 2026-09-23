@@ -145,7 +145,7 @@ def test_live_mode_without_key_returns_explicit_error_without_running_driver(mon
                 raise AssertionError("Missing credentials must be rejected before generation")
 
         async with kernel(NeverCalled()) as runtime, client_for(runtime) as client:
-            capabilities = (await client.get("/capabilities")).json()
+            capabilities = (await client.get("/kernel/capabilities")).json()
             assert capabilities["mode"] == "live" and not capabilities["llm_configured"]
             sid = (await client.post("/sessions", json={"agents": []})).json()["session_id"]
             response = await client.post(f"/sessions/{sid}/turns", json={

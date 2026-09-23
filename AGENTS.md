@@ -2,7 +2,7 @@
 
 Главный файл с инструкциями для AI-агентов (Codex, Claude Code и других) и для людей в команде.
 
-Для нового agent kernel действует [ADR 0009](docs/adr/0009-multi-agent-kernel.md) и
+Для нового agent kernel действует [ADR 0011](docs/adr/0011-multi-agent-kernel.md) и
 [план/контракт](docs/specs/agent-kernel.md): по поручению владельца они заменяют старые
 ограничения одного фона, двух LLM-вызовов, отсутствия streaming и прямой публикации доски.
 Остальные предметные инварианты сохраняются. Реализация — в `feat/blackboard-core`.
@@ -44,16 +44,17 @@
 | [0006](docs/adr/0006-background-assistant.md) | Фоновый помощник, патчи контекста, гейт |
 | [0007](docs/adr/0007-evaluation-gate.md) | `just eval`, метрики по ru/kk/mixed |
 | [0008](docs/adr/0008-voice-and-providers.md) | Голос push-to-talk, провайдеры, режим без ключей (proposed) |
+| [0009](docs/adr/0009-modular-backend.md) | Модули с публичным API, типы у владельца, без общего `schemas/` |
 
 ## Роли (3 человека)
 
 | Зона | Ответственность | Основные пути |
 |------|-----------------|---------------|
-| **A** | роутер, сценарный автомат, контракты, eval | `backend/app/router/`, `backend/app/executor/`, `backend/app/schemas/`, `eval/` |
+| **A** | роутер, сценарный автомат, контракты, eval | `backend/app/router/`, `backend/app/executor/`, `backend/app/context/`, `eval/` |
 | **B** | веб-интерфейс, браузерное аудио, панель трассировки | `frontend/` |
 | **C** | речевые адаптеры, данные, фоновый помощник, запуск, README | `backend/app/speech/`, `backend/app/knowledge/`, `backend/app/background/`, `compose.yaml`, `README.md` |
 
-Файлы разделены по зонам, чтобы не было конфликтов. Общие контракты (Pydantic-схемы, API, `BoardEntry`) меняем только через PR с апрувом владельца зоны A.
+Файлы разделены по зонам, чтобы не было конфликтов. Публичный API модуля (его `__init__.py`, HTTP, типы) меняем только через PR с апрувом владельца модуля.
 
 ## Документация: ADR и спеки
 
@@ -188,14 +189,20 @@ primary accuracy: ru __ / kk __ / mixed __
   datasets/            # стартовый кит без изменений (ADR 0002)
   docs/adr/            # решения
   docs/specs/          # спеки
-  backend/app/         # FastAPI: router/, executor/, background/, speech/, knowledge/, schemas/
+  backend/app/<module>/ # модули: context/, knowledge/, router/, executor/, background/, speech/
   backend/migrations/  # alembic
   backend/tests/
   eval/                # генерация predictions для just eval
   frontend/src/app/    # экран звонка, панель трассировки, экран устройства слоя
   ```
 - Frontend ходит в backend только через `/api/*` (Next rewrites → backend). URL бэкенда во фронте не хардкодим.
-- Все контракты между слоями описаны Pydantic-моделями (`backend/app/schemas/`). Фронт повторяет их типами TS.
+- **Модульность важнее общих правил раскладки (ADR 0009).** Backend — набор модулей `backend/app/<module>/`:
+  - публичный API модуля — только его `__init__.py`; соседи импортируют `from app.<module> import ...`, во внутренние файлы не лезут;
+  - Pydantic-типы живут в модуле-владельце, общего `schemas/` нет; чужой тип берём из публичного API владельца;
+  - модуль не знает о хранилище соседа (таблицы, SQL, JSON-файлы);
+  - FastAPI только в `api.py` модуля, роутеры подключает `main.py`;
+  - у модуля есть спека `docs/specs/<module>-module.md` с публичным API; меняешь API — меняешь спеку.
+- Фронт повторяет типами TS только HTTP-ответы модулей.
 - Данные кита kernel получает **только** через `from app.knowledge import Knowledge` (каталог, клиенты, KB, поиск; см. `docs/specs/knowledge-module.md`). JSON-файлы и таблицу `kit_records` напрямую не читаем.
 - Модели БД наследуются от `app.db.Base`. Их импорт добавляется в `backend/migrations/env.py`, после этого `just migration "..."`.
 - Каждый этап (STT, роутер, чтения, ответ, TTS) пишет тайминг на доску. Замеры честные: параллельные ветки не складываем.

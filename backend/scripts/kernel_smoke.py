@@ -52,7 +52,7 @@ async def run(live):
                 await asyncio.sleep(0.1)
             else:
                 raise RuntimeError("Smoke API server not ready")
-            capabilities = (await client.get("/capabilities")).json()
+            capabilities = (await client.get("/kernel/capabilities")).json()
             assert capabilities["mode"] == ("live" if live else "mock")
             created = await client.post("/sessions", json={})
             created.raise_for_status()

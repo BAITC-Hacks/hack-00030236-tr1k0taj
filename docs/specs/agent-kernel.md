@@ -3,13 +3,13 @@
 - Статус: принято к реализации по запросу владельца, 2026-09-23.
 - Ветка: `feat/blackboard-core`, основа: `main` после merge PR #2 (`744a7dd`).
 - Этот документ публикуется отдельным коммитом **до кода**.
-- Связанные решения: ADR 0009, ADR 0002–0008, `knowledge-module.md`.
+- Связанные решения: ADR 0011, ADR 0002–0008, `knowledge-module.md`.
 
 ## Обновление интеграции после PR #3/#4/#5
 
 В main появился `context` (единственный писатель состояния и доски), `call` (готовые
 /calls endpoints и SSE) и UUID сессии от фронта. Текущая реализация этой ветки
-публикуется как промежуточный PR по просьбе владельца; перед merge выполняются:
+публикуется в PR #6. Интеграция с опубликованными PR #3/#4/#5 включает:
 
 1. Перенос runtime на фасад Contexts, без второй независимой доменной памяти.
 2. Подключение к ports/API модуля call; сохранение фронтового UUID и существующих событий.
@@ -26,6 +26,26 @@
 
 Предыдущие разделы описывают реализованную независимую основу. Эти интеграционные
 поправки имеют приоритет для итогового PR. Ключи и платные live-проверки в Git не попадают.
+
+### Текущее подключение
+
+- `Contexts` хранит projection ядра в JSONB существующей `sessions`; события — в
+  `board_entries`. Отдельные `agent_sessions`/`agent_events` не создаются.
+- `/sessions/{id}/context` исключает внутренний kernel-state; `/board` исключает
+  внутренние записи. Публичный SSE главного имеет отдельный монотонный cursor.
+- `CallService` принимает optional kernel; штатные router/executor/STT/TTS остаются.
+  Ответ ядра подключается после исполнителя, на том же UUID/turn_id. Системные
+  ошибки провайдеров продолжают идти через честный template fallback.
+- `eos_to_playback_ms` — latency, `played_ms` — позиция ответа. Это разные поля.
+  Disconnect без позиции сохраняет `unknown`; cancel не уничтожает полезный фон.
+- Контракты ядра живут в `app.kernel`, ADR ядра — 0011 (0009 занят модульностью,
+  0010 зарезервирован коллегой для semantic search).
+- `RouterOutput.search_query` и RAG tool уже принимают английский запрос; default top-3.
+  До публикации ветки коллеги используется собственный проверенный public-document
+  индекс. Его RRF score не равен semantic + 0.3 lexical. `kit_variants`, expansions,
+  cache и приведённые recall ещё не интегрированы; это явно оставшаяся зависимость.
+  Миграция текущего индекса следует за `0002_context`; после публикации
+  `0003_kit_search` потребуется единый миграционный переход без удаления данных.
 
 ## 1. Результат и границы
 
@@ -93,7 +113,7 @@ streaming API, прерывание и история с состоянием в
 
 ## 4. Контракты состояния
 
-Все публичные модели — `backend/app/schemas/kernel.py`, extra-поля запроса запрещены.
+Все публичные модели — `backend/app/kernel/types.py`, extra-поля запроса запрещены.
 UUID используются для session/response/segment/event request identifiers.
 
 - Session: `session_id`, `generation`, `input_revision`, `status`, `next_turn_id`,
@@ -169,7 +189,7 @@ Interrupt принимает request_id, response_id, played_ms. Атомарн�
 
 Ниже backend-пути. В браузере к ним добавляется `/api` существующим Next proxy.
 
-- `GET /capabilities` — режим, streaming, playback protocol, доступность модели/RAG, лимиты.
+- `GET /kernel/capabilities` — режим, streaming, playback protocol, доступность модели/RAG, лимиты.
 - `POST /sessions` — `{agents?: AgentSpec[], context?: object}` → session snapshot.
 - `GET /sessions/{id}` — snapshot, последний seq, состояние ответа; внутреннего текста нет.
 - `POST /sessions/{id}/turns` — `{request_id, text}` → 202 `{turn_id,response_id}`.
@@ -233,7 +253,7 @@ Dev-разметка и sample dialogs в индекс не попадают.
 
 ## 11. Согласование с существующими документами
 
-ADR 0009 заменяет ограничения «один фон», «ровно два LLM-вызова», «без streaming»,
+ADR 0011 заменяет ограничения «один фон», «ровно два LLM-вызова», «без streaming»,
 «фон влияет только на следующий ответ» и «вся доска напрямую наружу» для этого ядра.
 Предметные правила кита, подтверждения действий и DATASET_TODAY сохраняются.
 Router schema при подключении соответствует README кита:

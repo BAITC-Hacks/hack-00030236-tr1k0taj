@@ -1,13 +1,13 @@
 """Public document embeddings with transactional invalidation.
 
 Revision ID: 0003_knowledge_vectors
-Revises: 0002_agent_kernel
+Revises: 0002_context
 """
 
 from alembic import op
 
 revision = "0003_knowledge_vectors"
-down_revision = "0002_agent_kernel"
+down_revision = "0002_context"
 branch_labels = None
 depends_on = None
 
