@@ -86,7 +86,7 @@ API endpoints / события / схема данных (request/response с п
 - Ветки: `feat/<short>`, `fix/<short>`, `docs/<short>`, `infra/<short>`.
 - Коммиты: Conventional Commits: `feat: ...`, `fix: ...`, `docs: ...`, `chore: ...`, `test: ...`.
 - PR маленькие, живут **не дольше ~45 минут**. Большую фичу режем на несколько PR.
-- Перед PR: `git fetch && git rebase origin/main`, `make up` и `make test` проходят локально.
+- Перед PR: `git fetch && git rebase origin/main`, `just up` и `just test` проходят локально.
 - Merge: **squash**. Ревью: один человек, быстро (≤5 мин): смотрим контракт, работоспособность и секреты. Стиль не обсуждаем.
 
 Создание PR (агенты используют `gh`):
@@ -105,10 +105,10 @@ gh pr create --fill --base main
 docs/specs/<feature>.md
 
 ## Как проверить
-make up && ...
+just up && ...
 
 ## Чеклист
-- [ ] make up поднимает проект с нуля
+- [ ] just reset поднимает проект с нуля
 - [ ] ключевые тесты проходят
 - [ ] нет секретов в коде, новые env-переменные есть в .env.example
 ```
@@ -122,27 +122,14 @@ make up && ...
 - У сервисов есть `healthcheck`, а зависимости указаны через `depends_on: condition: service_healthy`.
 - Миграции и seed-данные применяются автоматически при старте (отдельный one-shot сервис или entrypoint).
 - Порты наружу пробрасываем только те, что нужны для разработки и демо.
-- Никаких ручных шагов вне `make up`. Если шаг нужен, он автоматизирован.
+- Никаких ручных шагов вне `just up`. Если шаг нужен, он автоматизирован.
 - Внешние платные API: мок или флаг `USE_MOCKS=true` по умолчанию, чтобы поднять проект можно было без ключей.
 
-### Makefile — единая точка входа
+### justfile — единая точка входа
 
-```makefile
-up:      ## поднять всё
-	docker compose up -d --build
-down:    ## остановить
-	docker compose down
-reset:   ## снести с данными и поднять заново
-	docker compose down -v && docker compose up -d --build
-logs:
-	docker compose logs -f --tail=100
-test:    ## ключевые тесты
-	docker compose run --rm <app> <test-command>
-seed:
-	docker compose run --rm <app> <seed-command>
-```
+Команды: `just up`, `just down`, `just reset` (снести с данными и поднять), `just nuke` (снести всё, включая образы), `just build`, `just ps`, `just logs [service]`, `just test`, `just lint`, `just migrate`, `just migration "msg"`, `just psql`, `just sh [service]`. Полный список: `just`.
 
-Агенты запускают проект и тесты **только через `make`**, а не придумывают свои команды.
+Агенты запускают проект и тесты **только через `just`**, а не придумывают свои команды.
 
 ## Тесты: только ключевые
 
@@ -159,23 +146,27 @@ seed:
 - snapshot-тесты
 - тесты на edge cases, которых не будет в демо
 
-Весь `make test` должен проходить быстрее ~1 минуты.
+Весь `just test` должен проходить быстрее ~1 минуты.
 
 ## Конвенции кода
 
 - Стек фиксируется в `docs/adr/0001-*.md`. Новые языки, фреймворки или БД добавляем только через ADR.
 - Проверенные скучные инструменты лучше модных. Зависимость ставим, только если она экономит время.
-- Структура репо (адаптировать под стек в ADR 0001):
+- Стек (см. ADR 0001): backend — Python 3.13, FastAPI, Pydantic v2, SQLAlchemy async, Alembic, uv; frontend — Next.js App Router, TypeScript; БД — PostgreSQL.
+- Структура репо:
   ```
   compose.yaml
-  Makefile
+  justfile
   .env.example
   docs/adr/        # решения
   docs/specs/      # спеки фич
-  services/<name>/ # код сервисов (или apps/)
+  backend/         # FastAPI: app/ (код), migrations/ (alembic), tests/
+  frontend/        # Next.js: src/app/
   ```
+- Frontend ходит в backend только через `/api/*` (Next rewrites → backend). Абсолютные URL бэкенда во фронте не хардкодим.
+- Модели БД: SQLAlchemy в `backend/app/`, наследуются от `app.db.Base`. Их импорт добавляется в `backend/migrations/env.py`, после этого `just migration "..."`.
 - Конфиг только из env-переменных. Секреты никогда не коммитим.
-- Линтер и форматтер: дефолтные для стека, запускаются по `make lint`. Не спорим о стиле.
+- Линтер и форматтер: дефолтные для стека, запускаются по `just lint`. Не спорим о стиле.
 - Ошибки логируем, приложение не должно падать на демо: в UI показываем понятное сообщение.
 - Seed-данные для демо лежат в репо и должны быть реалистичными: демо показываем на них.
 - Hardcode и TODO допустимы, если помечены `// TODO(hack):`. После хакатона по ним будет понятно, что доделать.
@@ -186,7 +177,7 @@ seed:
 2. Нет спеки → напиши её (и ADR, если решение архитектурное), закоммить, потом код.
 3. Работай в отдельной ветке, никогда не коммить в `main` напрямую.
 4. Держи изменения в зоне своей задачи. Не рефактори чужой код попутно.
-5. Проверь перед PR: `make up` поднимается с нуля, `make test` зелёный.
+5. Проверь перед PR: `just reset` поднимает проект с нуля, `just test` зелёный.
 6. Открой PR через `gh pr create` с описанием по шаблону выше.
 7. Не добавляй тесты сверх раздела «Тесты: только ключевые».
 8. Меняешь контракт (API, схема БД, env) → обнови спеку и `.env.example` в том же PR.
