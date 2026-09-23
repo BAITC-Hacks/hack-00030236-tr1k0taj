@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends, FastAPI
@@ -5,9 +7,22 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db import get_session
+from app.config import settings
+from app.db import SessionLocal, engine, get_session
+from app.knowledge import ensure_loaded
+from app.knowledge.api import router as kit_router
 
-app = FastAPI(title="Voice Router API")
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    async with SessionLocal() as session:
+        await ensure_loaded(session, Path(settings.datasets_dir))
+    yield
+    await engine.dispose()
+
+
+app = FastAPI(title="Voice Router API", lifespan=lifespan)
+app.include_router(kit_router)
 
 Session = Annotated[AsyncSession, Depends(get_session)]
 

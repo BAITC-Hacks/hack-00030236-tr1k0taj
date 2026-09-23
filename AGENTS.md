@@ -46,7 +46,7 @@
 |------|-----------------|---------------|
 | **A** | роутер, сценарный автомат, контракты, eval | `backend/app/router/`, `backend/app/executor/`, `backend/app/schemas/`, `eval/` |
 | **B** | веб-интерфейс, браузерное аудио, панель трассировки | `frontend/` |
-| **C** | речевые адаптеры, данные, фоновый помощник, запуск, README | `backend/app/speech/`, `backend/app/data/`, `backend/app/background/`, `compose.yaml`, `README.md` |
+| **C** | речевые адаптеры, данные, фоновый помощник, запуск, README | `backend/app/speech/`, `backend/app/knowledge/`, `backend/app/background/`, `compose.yaml`, `README.md` |
 
 Файлы разделены по зонам, чтобы не было конфликтов. Общие контракты (Pydantic-схемы, API, `BoardEntry`) меняем только через PR с апрувом владельца зоны A.
 
@@ -183,7 +183,7 @@ primary accuracy: ru __ / kk __ / mixed __
   datasets/            # стартовый кит без изменений (ADR 0002)
   docs/adr/            # решения
   docs/specs/          # спеки
-  backend/app/         # FastAPI: router/, executor/, background/, speech/, data/, schemas/
+  backend/app/         # FastAPI: router/, executor/, background/, speech/, knowledge/, schemas/
   backend/migrations/  # alembic
   backend/tests/
   eval/                # генерация predictions для just eval
@@ -191,6 +191,7 @@ primary accuracy: ru __ / kk __ / mixed __
   ```
 - Frontend ходит в backend только через `/api/*` (Next rewrites → backend). URL бэкенда во фронте не хардкодим.
 - Все контракты между слоями описаны Pydantic-моделями (`backend/app/schemas/`). Фронт повторяет их типами TS.
+- Данные кита kernel получает **только** через `from app.knowledge import Knowledge` (каталог, клиенты, KB, поиск; см. `docs/specs/knowledge-module.md`). JSON-файлы и таблицу `kit_records` напрямую не читаем.
 - Модели БД наследуются от `app.db.Base`. Их импорт добавляется в `backend/migrations/env.py`, после этого `just migration "..."`.
 - Каждый этап (STT, роутер, чтения, ответ, TTS) пишет тайминг на доску. Замеры честные: параллельные ветки не складываем.
 - Ошибки провайдера не роняют звонок: показываем понятное состояние в UI и пишем событие на доску.
