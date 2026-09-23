@@ -35,7 +35,7 @@ logs *service:
 
 # ключевые тесты
 test:
-    docker compose exec backend pytest -q
+    docker compose exec -e MOCK_MODE=true -e EMBEDDINGS_ENABLED=false -e OPENAI_API_KEY= backend pytest -q
 
 # линтеры
 lint:
@@ -61,3 +61,39 @@ psql:
 # shell в контейнер: just sh backend
 sh service="backend":
     docker compose exec {{service}} sh
+
+# локальные проверки без Docker (uv + Python 3.13, PostgreSQL на localhost:55432)
+[positional-arguments]
+test-local *args:
+    MOCK_MODE=true EMBEDDINGS_ENABLED=false OPENAI_API_KEY= ./infra/backend-local.sh pytest -q "$@"
+
+[positional-arguments]
+lint-backend-local *args:
+    ./infra/backend-local.sh ruff check . "$@"
+
+migrate-local:
+    ./infra/backend-local.sh alembic upgrade head
+
+run-local:
+    ./infra/backend-local.sh uvicorn app.main:app --host 127.0.0.1 --port 8000
+
+# HTTP SSE + Postgres smoke; live prompts for a key without saving it
+smoke-local:
+    ./infra/backend-local.sh python -m scripts.kernel_smoke
+
+smoke-live-local:
+    ./infra/backend-local.sh python -m scripts.kernel_smoke --live
+
+index-local:
+    ./infra/backend-local.sh python -m scripts.index_knowledge
+
+# отдельный локальный PostgreSQL 17; PG_BIN можно переопределить
+db-local:
+    ./infra/postgres-local.sh start
+
+db-stop-local:
+    ./infra/postgres-local.sh stop
+
+[positional-arguments]
+psql-local *args:
+    ./infra/postgres-local.sh psql "$@"

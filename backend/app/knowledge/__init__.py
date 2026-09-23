@@ -14,6 +14,12 @@ See docs/specs/knowledge-module.md.
 
 from app.knowledge.catalog import Catalog
 from app.knowledge.loader import build_records, ensure_loaded, load_kit
+from app.knowledge.rag import (
+    RAG_KINDS,
+    reindex_knowledge,
+    schedule_reindex_knowledge,
+    stop_reindex_knowledge,
+)
 from app.knowledge.records import Records, normalize_phone
 from app.knowledge.search import Search
 from app.knowledge.service import Knowledge, open_knowledge
@@ -31,6 +37,7 @@ from app.knowledge.types import (
 )
 
 __all__ = [
+    "RAG_KINDS",
     "Action",
     "Catalog",
     "Claim",
@@ -50,4 +57,7 @@ __all__ = [
     "load_kit",
     "normalize_phone",
     "open_knowledge",
+    "reindex_knowledge",
+    "schedule_reindex_knowledge",
+    "stop_reindex_knowledge",
 ]

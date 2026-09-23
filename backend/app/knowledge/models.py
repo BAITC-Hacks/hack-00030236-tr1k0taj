@@ -1,6 +1,16 @@
-from sqlalchemy import Computed, DateTime, Index, String, Text, func
+from sqlalchemy import (
+    CheckConstraint,
+    Computed,
+    DateTime,
+    ForeignKeyConstraint,
+    Index,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.types import UserDefinedType
 
 from app.db import Base
 
@@ -28,4 +38,34 @@ class KitRecord(Base):
             postgresql_using="gin",
             postgresql_ops={"search_text": "gin_trgm_ops"},
         ),
+    )
+
+
+class VectorType(UserDefinedType):
+    cache_ok = True
+
+    def get_col_spec(self, **kw):
+        return "vector"
+
+
+class KnowledgeVector(Base):
+    """Vector width is per row to support model changes without changing the table type."""
+
+    __tablename__ = "knowledge_vectors"
+
+    kind: Mapped[str] = mapped_column(String(32), primary_key=True)
+    key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    model: Mapped[str] = mapped_column(String(128))
+    dimensions: Mapped[int]
+    text_hash: Mapped[str] = mapped_column(String(32))
+    embedding = mapped_column(VectorType(), nullable=False)
+    updated_at = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["kind", "key"], ["kit_records.kind", "kit_records.key"], ondelete="CASCADE"
+        ),
+        CheckConstraint("kind IN ('kb', 'office', 'clinic', 'inspection_point')"),
+        CheckConstraint("dimensions > 0"),
+        CheckConstraint("vector_dims(embedding) = dimensions"),
     )
