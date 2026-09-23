@@ -41,9 +41,7 @@ class Search:
     def __init__(self, store: Store):
         self._store = store
 
-    async def query(
-        self, q: str, kinds: list[str] | None = None, limit: int = 5
-    ) -> list[Hit]:
+    async def query(self, q: str, kinds: list[str] | None = None, limit: int = 5) -> list[Hit]:
         tsq = _tsquery(q)
         if not tsq:
             return []
@@ -52,7 +50,13 @@ class Search:
             {"q": q, "tsq": tsq, "kinds": kinds or SEARCHABLE_KINDS, "limit": limit},
         )
         return [
-            Hit(kind=r.kind, key=r.key, score=round(r.score, 4), snippet=r.snippet, payload=r.payload)
+            Hit(
+                kind=r.kind,
+                key=r.key,
+                score=round(r.score, 4),
+                snippet=r.snippet,
+                payload=r.payload,
+            )
             for r in rows
             if r.score >= MIN_SCORE
         ]

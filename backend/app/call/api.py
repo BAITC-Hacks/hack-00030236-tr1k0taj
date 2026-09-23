@@ -6,7 +6,7 @@
 from collections.abc import AsyncIterable
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Path, Request, UploadFile
+from fastapi import APIRouter, Depends, Form, HTTPException, Path, Request, UploadFile
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 from pydantic import BaseModel, Field
 
@@ -15,6 +15,7 @@ from app.call.ports import Providers
 from app.call.service import CallService
 from app.config import DATASET_TODAY
 from app.context import SessionContext, SessionNotFound
+from app.docs import SSE_EXAMPLE
 from app.router import RouterResult
 
 MAX_AUDIO_BYTES = 10 * 1024 * 1024
@@ -53,6 +54,10 @@ FreeSession = Annotated[str, Depends(free_session)]
 
 NOT_FOUND = {404: {"description": "Сессии нет (или backend перезапускался)"}}
 TURN_ERRORS = NOT_FOUND | {
+    200: {
+        "description": "Поток событий хода. Пример ниже показывает форму, числа в нём условные.",
+        "content": {"text/event-stream": {"example": SSE_EXAMPLE}},
+    },
     409: {"description": "`turn_in_progress`: предыдущий ход ещё идёт"},
     422: {"description": "Пустая реплика или аудио"},
 }
@@ -91,6 +96,13 @@ class TextTurn(BaseModel):
     text: str = Field(
         min_length=1, max_length=2000, examples=["Что с моим заявлением по затоплению?"]
     )
+    language_hint: Literal["ru", "kk"] | None = Field(
+        None, description="Подсказка языка; роутер всё равно определяет язык сам"
+    )
+
+
+class AudioTurn(BaseModel):
+    audio: UploadFile = Field(description="Запись push-to-talk: webm/ogg/wav, до 10 МБ")
     language_hint: Literal["ru", "kk"] | None = Field(
         None, description="Подсказка языка; роутер всё равно определяет язык сам"
     )
@@ -181,16 +193,19 @@ async def text_turn(
 async def audio_turn(
     session_id: FreeSession,
     calls: Calls,
-    audio: Annotated[UploadFile, File(description="Запись push-to-talk")],
-    language_hint: Annotated[Literal["ru", "kk"] | None, Form()] = None,
+    form: Annotated[AudioTurn, Form(media_type="multipart/form-data")],
 ) -> AsyncIterable[TurnEvent]:
+    audio = form.audio
     data = await audio.read()
     if not data:
         raise HTTPException(422, "empty audio")
     if len(data) > MAX_AUDIO_BYTES:
         raise HTTPException(413, "audio too large")
     async for e in calls.run_turn(
-        session_id, audio=data, mime=audio.content_type or "audio/webm", language_hint=language_hint
+        session_id,
+        audio=data,
+        mime=audio.content_type or "audio/webm",
+        language_hint=form.language_hint,
     ):
         yield ServerSentEvent(event=e.type, data=e)
 
