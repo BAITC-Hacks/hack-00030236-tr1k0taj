@@ -127,3 +127,16 @@ just up
 ## Для разработчиков
 
 Правила проекта для людей и AI-агентов: [`AGENTS.md`](AGENTS.md). Спецификация: [`docs/specs/voice-router-spec.md`](docs/specs/voice-router-spec.md).
+
+## Материалы кейса и данные
+
+Исходный комплект кейса 2 находится в [`datasets/`](datasets/): все 11 файлов организаторов сохранены без изменений. Начните с [русского README кита](datasets/README.ru.md).
+
+- **Каталог и контракты:** `scenarios.json`, `actions.json`, `slots.json`.
+- **Факты для ответов:** `knowledge_base.json`, `mock_backend.json`.
+- **Примеры и оценка:** `dialogs_sample.json`, `dev_utterances.json`, `evaluate.py`.
+- **Оригинальные инструкции:** `README.md` (английский), `README.ru.md`, `README.kz.md`.
+
+Назначение файлов, связи между ними и правила работы описаны в [путеводителе по данным](docs/dataset-guide.md). Backend получает комплект по пути `/datasets` через read-only mount; например, каталог сценариев — `/datasets/scenarios.json`. Изменения состояния приложения хранятся отдельно от исходного кита.
+
+Дата набора — **2026-10-01**. Разметка `expected` из dev-набора предназначена только для evaluator и не передаётся роутеру. `just eval` пока остаётся планом: импорт данных сам по себе не реализует вызовы LLM и оценку приложения.

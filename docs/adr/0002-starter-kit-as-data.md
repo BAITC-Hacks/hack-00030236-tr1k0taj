@@ -9,7 +9,7 @@
 Организаторы дают стартовый кит: `scenarios.json` (40 сценариев), `actions.json`, `slots.json`, `mock_backend.json`, `knowledge_base.json`, `dialogs_sample.json`, `dev_utterances.json`, `evaluate.py`. Кит и его README главнее нашей спеки.
 
 ## Решение
-- Кит кладём в репо без изменений в `datasets/` и монтируем в backend read-only. Демо-правки в исходные файлы не вносим.
+- Кит кладём в репо без изменений непосредственно в `datasets/` и монтируем в backend read-only по пути `/datasets`. Карта файлов — [docs/dataset-guide.md](../dataset-guide.md). Демо-правки в исходные файлы не вносим.
 - Каталог сценариев, действий и слотов загружается из JSON при старте. Сценарий — это данные, а не код: новый сценарий добавляется правкой JSON.
 - Роутим по **всем 40** сценариям плюс `SYS_OUT_OF_SCOPE`, `SYS_UNCLEAR`, `SYS_GOODBYE`. Сужать каталог запрещено.
 - Константа `DATASET_TODAY = 2026-10-01`. `date.today()` в доменной логике не используем.
