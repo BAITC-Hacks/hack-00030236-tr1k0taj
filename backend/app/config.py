@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://voice_router:voice_router@localhost:5432/voice_router"
     openai_api_key: str = ""
     llm_model: str = "gpt-4.1-mini"
+    # Модель роутера (perf/latency, ADR 0004). Пусто → llm_model. Меняем только измерив just eval.
+    router_model: str = ""
     mock_mode: bool = True
     llm_timeout_seconds: float = Field(default=30, ge=1, le=120)
     embedding_model: str = "text-embedding-3-large"

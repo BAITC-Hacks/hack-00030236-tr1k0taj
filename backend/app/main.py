@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import call, context, kernel, knowledge, tracer
+from app import call, context, kernel, knowledge, router, tracer
 from app.config import settings
 from app.db import SessionLocal, engine, get_session
 from app.docs import DESCRIPTION, TAGS
@@ -35,6 +35,7 @@ async def lifespan(application: FastAPI):
     await kernel.recover()
     schedule_reindex_knowledge()
     warm_filler_task = asyncio.create_task(call.warm_tts_filler(providers.tts))
+    application.state.router_warmup = asyncio.create_task(router.warmup())  # perf/latency
     try:
         yield
     finally:
