@@ -10,6 +10,8 @@ import { translate, type TranslationKey } from "@/lib/i18n";
 import type { Capabilities } from "@/lib/call-contract";
 import type { Conversation, Turn, VoiceAdapter } from "@/lib/types";
 
+const REALTIME_STT = false;
+
 function useVoiceState(adapter: VoiceAdapter) {
   const { locale, setLocale, sound, setSound, volume, setVolume, reduced, setReduced } = usePreferences();
   const [session, setSession] = useState<Conversation | null>(null);
@@ -36,11 +38,13 @@ function useVoiceState(adapter: VoiceAdapter) {
     ...baseRecorder,
     start: () => {
       sttPromise.current = null; autoSend.current = false;
-      void stt.start(locale);
+      // TODO(hack): realtime STT в браузере распознаёт хуже серверного — выключен, запись
+      // уходит целиком на backend (POST /turns/audio). Включить: REALTIME_STT = true.
+      if (REALTIME_STT) void stt.start(locale);
       return baseRecorder.start();
     },
     // Конец записи сразу отправляет ход: без предпросмотра и лишнего клика.
-    stop: () => { sttPromise.current = stt.stop(); autoSend.current = true; baseRecorder.stop(); },
+    stop: () => { sttPromise.current = REALTIME_STT ? stt.stop() : null; autoSend.current = true; baseRecorder.stop(); },
     discard: () => { sttPromise.current = null; autoSend.current = false; stt.discard(); baseRecorder.discard(); },
   };
   const request = useRef<{ token: number; busy: boolean; controller?: AbortController; sessionId?: string; turnId?: number; traceparent?: string }>({ token: 0, busy: false });
