@@ -142,6 +142,7 @@ def package(state, response_id=None, *, agent=None, task_id=None):
             if item["role"] == "user":
                 admit("history_summary", {"turn_id": item["turn_id"], "kind": "user_excerpt",
                     "text": item.get("text", "")[:400], "truncated": len(item.get("text", "")) > 400})
+    result["has_sources"] = bool(result["sources"] or result["background"])
     result["context_chars"] = _size(result)
     return result
 
