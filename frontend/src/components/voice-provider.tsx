@@ -61,7 +61,8 @@ function useVoiceState(adapter: VoiceAdapter) {
   }, [adapter, sessionId, generation, isLive, publish]);
   const t = (key: TranslationKey) => translate(key, locale);
   function archive(current: Conversation, outcome: Conversation["outcome"] = "completed") {
-    const ended = { ...current, endedAt: new Date().toISOString(), outcome: current.outcome ?? (current.turns.at(-1)?.status === "error" ? "error" : outcome) };
+    const lastStatus = current.turns.at(-1)?.status;
+    const ended = { ...current, endedAt: new Date().toISOString(), outcome: current.outcome ?? (lastStatus === "cancelled" ? "interrupted" : lastStatus === "error" ? "error" : outcome) };
     if (ended.mode === "live" && ended.turns.length) setHistory(old => [ended, ...old.filter(s => s.id !== ended.id)]);
     return ended;
   }
