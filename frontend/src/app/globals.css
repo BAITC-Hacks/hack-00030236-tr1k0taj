@@ -27,3 +27,21 @@ html[data-reduced-motion=true] .conversation-scroll{scroll-behavior:auto}
 
 /* Live partial transcript while recording (realtime STT) */
 .live-partial { flex-basis: 100%; margin: 6px 0 0; font-size: 15px; line-height: 1.4; color: var(--text, inherit); opacity: .85; }
+
+/* Push-to-talk */
+.ptt{display:flex;align-items:center;gap:14px;user-select:none;-webkit-user-select:none}
+.ptt-button{position:relative;width:64px;height:64px;border-radius:50%;flex-shrink:0;touch-action:none;cursor:pointer;display:flex;align-items:center;justify-content:center}
+.ptt-button:disabled{opacity:.5;cursor:default}
+.ptt-core{position:relative;z-index:1;width:64px;height:64px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#fff;background:radial-gradient(circle at 35% 30%,#1fb488,var(--primary) 70%);box-shadow:0 6px 18px rgba(0,125,97,.28),inset 0 1px 0 rgba(255,255,255,.25);transition:transform 120ms,background 160ms,box-shadow 160ms}
+.ptt-button:hover:not(:disabled) .ptt-core{transform:translateY(-1px);box-shadow:0 9px 22px rgba(0,125,97,.34)}
+.ptt-button:active .ptt-core{transform:scale(.94)}
+.ptt-ring{position:absolute;inset:-6px;border-radius:50%;border:2px solid rgba(0,125,97,.18);transform:scale(calc(1 + var(--level,0) * .45));transition:transform 90ms linear,border-color 160ms}
+.ptt-live .ptt-core{background:radial-gradient(circle at 35% 30%,#ef5b52,#c9362f 70%);box-shadow:0 6px 22px rgba(201,54,47,.38)}
+.ptt-live .ptt-ring{border-color:rgba(201,54,47,.35);animation:ptt-pulse 1.4s ease-out infinite}
+.ptt-label{display:flex;flex-direction:column;gap:3px;min-width:0}
+.ptt-label strong{font-size:12px;font-weight:700}
+.ptt-live .ptt-label strong{color:#c9362f}
+.ptt-label small{font-size:9px;color:var(--secondary)}
+@keyframes ptt-pulse{0%{box-shadow:0 0 0 0 rgba(201,54,47,.28)}100%{box-shadow:0 0 0 18px rgba(201,54,47,0)}}
+@media(prefers-reduced-motion:reduce){.ptt-live .ptt-ring{animation:none}}
+@media(max-width:700px){.ptt-label small{display:none}.ptt-button,.ptt-core{width:56px;height:56px}}
