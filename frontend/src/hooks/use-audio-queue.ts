@@ -95,7 +95,7 @@ class SentencePlayer {
       if (bytes.length < 2) return;
       const samples = pcmToFloat32(bytes);
       const buffer = this.ctx.createBuffer(1, samples.length, PCM_RATE);
-      buffer.copyToChannel(samples, 0);
+      buffer.getChannelData(0).set(samples);
       const source = this.ctx.createBufferSource();
       source.buffer = buffer;
       source.connect(this.gain);

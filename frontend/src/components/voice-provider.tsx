@@ -24,20 +24,24 @@ function useVoiceState(adapter: VoiceAdapter) {
   const baseRecorder = useRecorder(); const playback = useAudioQueue(sound, volume / 100);
   const sessionIdRef = useRef<string | undefined>(undefined);
   const sttPromise = useRef<Promise<RealtimeSttResult> | null>(null);
+  const autoSend = useRef(false);
+  const sendRef = useRef<(value: string | Blob) => Promise<boolean>>(async () => false);
   const stt = useRealtimeStt((languageHint, signal) => {
-    const sid = sessionIdRef.current;
-    if (!sid || !adapter.sttSession) return Promise.reject(new Error("stt_session_unavailable"));
+    // Звонок может ещё не существовать (первая запись): секрету UUID сессии не важен.
+    const sid = sessionIdRef.current ?? crypto.randomUUID();
+    if (!adapter.sttSession) return Promise.reject(new Error("stt_session_unavailable"));
     return adapter.sttSession(sid, languageHint, signal);
   });
   const recorder = {
     ...baseRecorder,
     start: () => {
-      sttPromise.current = null;
-      if (sessionIdRef.current) void stt.start(locale);
+      sttPromise.current = null; autoSend.current = false;
+      void stt.start(locale);
       return baseRecorder.start();
     },
-    stop: () => { sttPromise.current = stt.stop(); baseRecorder.stop(); },
-    discard: () => { sttPromise.current = null; stt.discard(); baseRecorder.discard(); },
+    // Конец записи сразу отправляет ход: без предпросмотра и лишнего клика.
+    stop: () => { sttPromise.current = stt.stop(); autoSend.current = true; baseRecorder.stop(); },
+    discard: () => { sttPromise.current = null; autoSend.current = false; stt.discard(); baseRecorder.discard(); },
   };
   const request = useRef<{ token: number; busy: boolean; controller?: AbortController; sessionId?: string; turnId?: number; traceparent?: string }>({ token: 0, busy: false });
   const publish = useCallback((next: Conversation | null) => { sessionRef.current = next; setSession(next); }, []);
@@ -94,6 +98,11 @@ function useVoiceState(adapter: VoiceAdapter) {
     stop(); recorder.discard();
     publish(null); setSelectedTurn(null); setDraft(""); setNotice(null);
   }
+  useEffect(() => {
+    if (!autoSend.current || baseRecorder.phase !== "ready" || !baseRecorder.blob) return;
+    autoSend.current = false;
+    void sendRef.current(baseRecorder.blob);
+  }, [baseRecorder.phase, baseRecorder.blob]);
   async function send(value: string | Blob) {
     if (request.current.busy || (typeof value === "string" && !value.trim())) return false;
     if (!adapter.available) { setNotice("notConnected"); return false; }
@@ -197,7 +206,8 @@ function useVoiceState(adapter: VoiceAdapter) {
     publish({ ...stopped, endedAt: new Date().toISOString(), outcome: stopped.outcome ?? (lastStatus === "cancelled" || interrupted ? "interrupted" : lastStatus === "error" ? "error" : "completed") });
   }
   async function copy(text: string) { try { await navigator.clipboard.writeText(text); setToast("copied"); } catch { setToast("copyError"); } }
-  return { locale, setLocale, t, sound, setSound, volume, setVolume, reduced, setReduced, session, selectedTurn, setSelectedTurn, draft, setDraft, textOpen, setTextOpen, busy, notice, setNotice, toast, setToast, health, capabilities, playback, recorder, available: adapter.available, reset, send, end, stop, copy };
+  useEffect(() => { sendRef.current = send; });
+  return { partial: stt.partial, locale, setLocale, t, sound, setSound, volume, setVolume, reduced, setReduced, session, selectedTurn, setSelectedTurn, draft, setDraft, textOpen, setTextOpen, busy, notice, setNotice, toast, setToast, health, capabilities, playback, recorder, available: adapter.available, reset, send, end, stop, copy };
 }
 
 type VoiceState = ReturnType<typeof useVoiceState>;

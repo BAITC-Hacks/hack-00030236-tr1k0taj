@@ -24,3 +24,6 @@ html[data-reduced-motion=true] .modal-drawer[open]{animation:none}
 html[data-reduced-motion=true] .conversation-scroll{scroll-behavior:auto}
 .mobile-filter-groups .filter-options{max-height:none}.modal-body:has(.mobile-filter-groups)>.dialog-actions{position:sticky;bottom:-24px;margin:16px -24px -24px;padding:16px 24px;background:white;border-top:1px solid var(--line);z-index:1}.modal-body:has(.mobile-filter-groups){padding-bottom:24px}
 @media(max-width:900px){.sidebar{visibility:hidden}.sidebar-open{visibility:visible}}
+
+/* Live partial transcript while recording (realtime STT) */
+.live-partial { flex-basis: 100%; margin: 6px 0 0; font-size: 15px; line-height: 1.4; color: var(--text, inherit); opacity: .85; }
