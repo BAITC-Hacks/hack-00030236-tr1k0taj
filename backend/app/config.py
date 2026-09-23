@@ -12,6 +12,11 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://voice_router:voice_router@localhost:5432/voice_router"
     openai_api_key: str = ""
     llm_model: str = "gpt-4.1-mini"
+    # Роль-специфичные модели: критический путь можно держать на быстрой без ризонинга.
+    router_model: str = ""
+    speaker_model: str = ""
+    background_model: str = ""
+    router_max_output_tokens: int = Field(default=400, ge=64, le=4000)
     mock_mode: bool = True
     llm_timeout_seconds: float = Field(default=30, ge=1, le=120)
     embedding_model: str = "text-embedding-3-large"

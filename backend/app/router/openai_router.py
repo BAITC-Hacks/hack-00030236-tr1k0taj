@@ -13,6 +13,16 @@ from app.config import DATASET_TODAY, settings
 from app.knowledge import Knowledge, Scenario, Slot, SystemIntent
 from app.router.types import RouterOutput, RouterResult
 
+# Ризонинг-токены генерируются до первого видимого токена, поэтому на критическом
+# пути они не нужны. Параметр принимают только ризонинг-модели: остальным его слать нельзя.
+_REASONING_PREFIXES = ("gpt-5", "o1", "o3", "o4")
+
+
+def _reasoning_off(model: str) -> dict:
+    name = (model or "").lower()
+    if any(name.startswith(prefix) for prefix in _REASONING_PREFIXES):
+        return {"reasoning": {"effort": "minimal"}}
+    return {}
 
 class RouterUnavailable(Exception):
     """Роутер не настроен или провайдер упал. call превращает это в событие error с кодом."""
@@ -125,7 +135,7 @@ class OpenAIRouter:
 
     def __init__(self, client: Any = None, model: str | None = None):
         self._client = client
-        self.model = model or settings.llm_model
+        self.model = model or settings.router_model or settings.llm_model
         # TODO(hack): кэш на процесс, ключ — хэш каталога; правки каталога через CRUD меняют хэш.
         self._cache: tuple[str, str, list[str]] | None = None
 
@@ -169,6 +179,8 @@ class OpenAIRouter:
                                  "schema": output_schema(ids)}},
                 temperature=0,
                 store=False,
+                max_output_tokens=settings.router_max_output_tokens,
+                **_reasoning_off(self.model),
             )
         except Exception as e:
             raise RouterUnavailable("llm_error", f"LLM-роутер недоступен: {type(e).__name__}") from e
