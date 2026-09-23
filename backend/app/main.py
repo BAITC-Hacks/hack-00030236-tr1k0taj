@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 
-app = FastAPI(title="Tr1k0TaJ API")
+app = FastAPI(title="Voice Router API")
 
 Session = Annotated[AsyncSession, Depends(get_session)]
 

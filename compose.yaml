@@ -1,10 +1,12 @@
+name: voice-router
+
 services:
   db:
     image: postgres:17-alpine
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-app}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
-      POSTGRES_DB: ${POSTGRES_DB:-app}
+      POSTGRES_USER: ${POSTGRES_USER:-voice_router}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-voice_router}
+      POSTGRES_DB: ${POSTGRES_DB:-voice_router}
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
@@ -18,7 +20,7 @@ services:
   backend:
     build: ./backend
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@db:5432/${POSTGRES_DB:-app}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-voice_router}:${POSTGRES_PASSWORD:-voice_router}@db:5432/${POSTGRES_DB:-voice_router}
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     volumes:

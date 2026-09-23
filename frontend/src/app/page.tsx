@@ -17,7 +17,7 @@ export default function Home() {
 
   return (
     <main>
-      <h1>Tr1k0TaJ</h1>
+      <h1>Voice Router</h1>
       <p>Backend: {error ?? (health ? `${health.status}, db: ${health.db}` : "loading…")}</p>
     </main>
   );
