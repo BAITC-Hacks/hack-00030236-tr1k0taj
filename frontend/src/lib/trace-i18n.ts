@@ -52,11 +52,70 @@ const words = {
   statusOk: ["Успешно", "Сәтті"],
   statusError: ["Ошибка", "Қате"],
   inspect: ["Открыть полный журнал", "Толық журналды ашу"],
+  result: ["Результат хода", "Кезек нәтижесі"],
+  question: ["Что сказал клиент", "Клиенттің сөзі"],
+  routeSelected: ["Выбран сценарий", "Сценарий таңдалды"],
+  clarify: ["Нужно уточнение клиента", "Клиенттен нақтылау қажет"],
+  handoff: ["Выбрана передача оператору", "Операторға беру таңдалды"],
+  noDecision: ["Решение ещё не получено", "Шешім әлі алынған жоқ"],
+  pendingResult: ["Результат появится после сохранения хода сервером.", "Нәтиже сервер кезекті сақтағаннан кейін пайда болады."],
+  serviceTrace: ["Служебная трасса", "Қызметтік трасса"],
+  serviceTraceText: ["В этой трассе нет завершённого хода. События доступны в технических деталях.", "Бұл трассада аяқталған кезек жоқ. Оқиғалар техникалық мәліметтерде қолжетімді."],
+  technical: ["Технические детали", "Техникалық мәліметтер"],
+  sessionSummary: ["Сводка звонка и расход моделей", "Қоңырау қорытындысы және модель шығыны"],
+  rawErrors: ["Подробности ошибок", "Қателер туралы мәліметтер"],
+  llmUnavailable: ["Модель ответа недоступна. Сервис не смог обработать запрос.", "Жауап моделі қолжетімсіз. Сервис сұрауды өңдей алмады."],
+  sttError: ["Не удалось распознать голос. Повторите запись или отправьте текст.", "Дауысты тану мүмкін болмады. Қайта жазып көріңіз немесе мәтін жіберіңіз."],
+  ttsError: ["Не удалось озвучить ответ. Проверьте текст ответа в разговоре.", "Жауапты дыбыстау мүмкін болмады. Сөйлесудегі жауап мәтінін тексеріңіз."],
+  routerError: ["Не удалось определить сценарий обращения.", "Өтініш сценарийін анықтау мүмкін болмады."],
+  executorError: ["Не удалось выполнить этап сценария.", "Сценарий кезеңін орындау мүмкін болмады."],
+  responseError: ["Не удалось сформулировать ответ.", "Жауапты құрастыру мүмкін болмады."],
+  interrupted: ["Обработка хода была прервана.", "Кезекті өңдеу үзілді."],
+  processingError: ["Во время обработки произошла ошибка. Подробности доступны ниже.", "Өңдеу кезінде қате пайда болды. Мәліметтер төменде қолжетімді."],
+  textInput: ["Текст", "Мәтін"],
+  audioInput: ["Голос", "Дауыс"],
 } as const;
 export type TraceTextKey = keyof typeof words;
 export function traceText(locale: Locale, key: TraceTextKey) { return words[key][locale === "kk" ? 1 : 0]; }
 export function formatTraceMs(value: number | null | undefined, locale: Locale) {
-  return typeof value === "number" && Number.isFinite(value) ? `${value.toLocaleString(locale, { maximumFractionDigits: 3 })} мс` : "—";
+  if (typeof value !== "number" || !Number.isFinite(value)) return "—";
+  const divisor = value >= 60_000 ? 60_000 : value >= 1_000 ? 1_000 : 1;
+  const unit = divisor === 60_000 ? "мин" : divisor === 1_000 ? "с" : "мс";
+  return `${(value / divisor).toLocaleString(locale, { maximumFractionDigits: divisor === 1 ? 3 : 2 })} ${unit}`;
+}
+
+const stageNames: Record<string, readonly [string, string]> = {
+  turn: ["Обработка реплики", "Клиент сөзін өңдеу"],
+  stt: ["Распознавание речи", "Сөйлеуді тану"],
+  router: ["Выбор сценария", "Сценарий таңдау"],
+  executor: ["Выполнение сценария", "Сценарийді орындау"],
+  reads: ["Поиск данных", "Деректерді іздеу"],
+  response: ["Подготовка ответа", "Жауапты дайындау"],
+  responder: ["Подготовка ответа", "Жауапты дайындау"],
+  tts: ["Озвучивание ответа", "Жауапты дыбыстау"],
+  "tts.sentence": ["Озвучивание предложения", "Сөйлемді дыбыстау"],
+  tts_first_audio: ["До первого звука", "Алғашқы дыбысқа дейін"],
+  "llm.call": ["Обращение к модели", "Модельге сұрау"],
+  "db.query": ["Запрос к базе данных", "Дерекқорға сұрау"],
+  "agent.run": ["Работа фонового помощника", "Фондық көмекшінің жұмысы"],
+  segment: ["Часть ответа", "Жауап бөлігі"],
+  action: ["Выполнение действия", "Әрекетті орындау"],
+};
+export function traceStageTitle(name: string, locale: Locale) {
+  return stageNames[name]?.[locale === "kk" ? 1 : 0] ?? name;
+}
+export function traceErrorText(error: { code: string | null; stage: string | null; span_name: string }, locale: Locale) {
+  const code = error.code ?? "";
+  const stage = error.stage ?? error.span_name;
+  const key: TraceTextKey = code === "llm_unavailable" ? "llmUnavailable"
+    : code === "request_interrupted" ? "interrupted"
+    : stage === "stt" || code.startsWith("stt_") ? "sttError"
+    : stage.startsWith("tts") || code.startsWith("tts_") ? "ttsError"
+    : stage === "router" ? "routerError"
+    : stage === "executor" ? "executorError"
+    : stage === "responder" || stage === "response" ? "responseError"
+    : "processingError";
+  return traceText(locale, key);
 }
 export function formatTraceDate(value: string | null | undefined, locale: Locale) {
   if (!value) return "—";

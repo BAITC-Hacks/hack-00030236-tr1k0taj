@@ -1,6 +1,11 @@
-import { Suspense } from "react";
-import { TraceJournal } from "@/components/trace-journal";
+import { redirect } from "next/navigation";
 
-export default function TracesPage() {
-  return <Suspense fallback={<p role="status">Загрузка журнала… / Журнал жүктелуде…</p>}><TraceJournal /></Suspense>;
+export default async function LegacyTracesPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
+  const params = await searchParams;
+  const query = new URLSearchParams();
+  for (const key of ["session", "trace"]) {
+    const value = params[key];
+    if (typeof value === "string") query.set(key, value);
+  }
+  redirect(`/history${query.size ? `?${query}` : ""}`);
 }

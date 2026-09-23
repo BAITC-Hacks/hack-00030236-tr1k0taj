@@ -13,7 +13,7 @@ export type Turn = {
 };
 export type Conversation = {
   id: string; generation: number; startedAt: string; endedAt?: string;
-  mode: "live" | "example"; turns: Turn[]; outcome?: "completed" | "handoff" | "interrupted" | "error";
+  mode: "live"; turns: Turn[]; outcome?: "completed" | "handoff" | "interrupted" | "error";
   client?: { name: string; phone: string; city: string };
   claim?: { id: string; status: string; nextStep: string };
   facts: Fact[]; pendingTopics: string[];

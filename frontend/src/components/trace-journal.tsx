@@ -13,7 +13,7 @@ import { Icon } from "./icon";
 export function TraceJournal() {
   const { locale, t, session } = useVoice(); const { scenarioTitle } = useCatalog();
   const router = useRouter(); const params = useSearchParams();
-  const selected = params.get("session"); const selectedTrace = params.get("trace") ?? undefined;
+  const selected = params.get("session")?.toLowerCase(); const selectedTrace = params.get("trace") ?? undefined;
   const [page, setPage] = useState(0); const [size, setSize] = useState(10); const [revision, setRevision] = useState(0);
   const [lookup, setLookup] = useState(""); const [invalid, setInvalid] = useState(false);
   const [result, setResult] = useState<{ key: string; rows: SessionTraceSummary[]; error: boolean } | null>(null);
@@ -29,13 +29,13 @@ export function TraceJournal() {
     }).catch(() => { if (!controller.signal.aborted) setResult({ key, rows: [], error: true }); });
     return () => controller.abort();
   }, [key, size, page]);
-  function open(id: string) { router.push(`/traces?session=${encodeURIComponent(id)}`, { scroll: false }); }
+  function open(id: string) { router.push(`/history?session=${encodeURIComponent(id)}`, { scroll: false }); }
   const active = session?.mode === "live" && !session.endedAt && session.id === selected;
   return <>
-    <div className="page-heading"><div><div className="eyebrow">CALL OBSERVABILITY</div><h1>{t("traceJournal")}</h1><p>{label("Звонки и события с сервера. Выберите сессию, чтобы увидеть весь путь обработки.", "Сервердегі қоңыраулар мен оқиғалар. Өңдеу жолын көру үшін сеансты таңдаңыз.")}</p></div><button className="button secondary" disabled={loading} onClick={() => setRevision(v => v + 1)}><Icon name="history" size={16} />{label("Обновить", "Жаңарту")}</button></div>
+    <div className="page-heading"><div><div className="eyebrow">CALL OBSERVABILITY</div><h1>{t("history")}</h1><p>{label("Звонки и события с сервера. Выберите сессию, чтобы увидеть весь путь обработки.", "Сервердегі қоңыраулар мен оқиғалар. Өңдеу жолын көру үшін сеансты таңдаңыз.")}</p></div><button className="button secondary" disabled={loading} onClick={() => setRevision(v => v + 1)}><Icon name="history" size={16} />{label("Обновить", "Жаңарту")}</button></div>
     <div className="journal-intro"><Icon name="layers" size={19} /><p>{label("Одна строка — один звонок по UUID. Внутри: реплики, этапы, ошибки и использование моделей.", "Әр жол — UUID бойынша бір қоңырау. Ішінде: сөздер, кезеңдер, қателер және модельдерді пайдалану.")}</p>{session?.mode === "live" && <button className="button quiet" onClick={() => open(session.id)}>{label("Текущий звонок", "Ағымдағы қоңырау")}<Icon name="arrow" size={14} /></button>}</div>
     <section className="list-card" aria-busy={loading}>
-      <form className="filters" onSubmit={event => { event.preventDefault(); const id = lookup.trim(); const valid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(id); setInvalid(!valid); if (valid) open(id); }}>
+      <form className="filters" onSubmit={event => { event.preventDefault(); const id = lookup.trim().toLowerCase(); const valid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(id); setInvalid(!valid); if (valid) open(id); }}>
         <label className="search-field"><Icon name="search" size={17} /><input value={lookup} onChange={event => { setLookup(event.target.value); setInvalid(false); }} aria-label={label("UUID звонка", "Қоңырау UUID-і")} placeholder={label("Открыть звонок по UUID", "Қоңырауды UUID бойынша ашу")} spellCheck={false} /></label><button className="button secondary" disabled={!lookup.trim()}>{label("Открыть звонок", "Қоңырауды ашу")}</button>
         {invalid && <p className="journal-input-error" role="alert">{label("Укажите UUID в формате xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx.", "UUID-ді xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx пішімінде енгізіңіз.")}</p>}
       </form>
@@ -45,6 +45,6 @@ export function TraceJournal() {
       </tr>)}</tbody></table></div>}
       <div className="pagination"><span>{rows.length ? `${page * size + 1}–${page * size + rows.length}` : "0"} {label("звонков", "қоңырау")}</span><label className="page-size">{t("pageSize")}<select value={size} onChange={event => { setSize(Number(event.target.value)); setPage(0); }} disabled={loading}>{[10, 25, 50].map(value => <option key={value}>{value}</option>)}</select></label><nav aria-label={label("Страницы журнала", "Журнал беттері")}><button disabled={page === 0 || loading} onClick={() => setPage(v => v - 1)}>{t("prev")}</button><span className="journal-page">{page + 1}</span><button disabled={!hasNext || loading} onClick={() => setPage(v => v + 1)}>{t("next")}</button></nav></div>
     </section><p className="catalog-disclaimer">{label("Список упорядочен по последней активности. Незавершённые этапы появятся после их сохранения; обновите журнал, чтобы увидеть новые события.", "Тізім соңғы белсенділік бойынша реттелген. Аяқталмаған кезеңдер сақталғаннан кейін пайда болады; жаңа оқиғалар үшін журналды жаңартыңыз.")}</p>
-    {selected && <Modal title={label("Трейс звонка", "Қоңырау трейсі")} onClose={() => router.push("/traces", { scroll: false })} wide drawer><SessionTracePanel key={selected} sessionId={selected} traceId={selectedTrace} live={active} /></Modal>}
+    {selected && <Modal title={label("Трейс звонка", "Қоңырау трейсі")} onClose={() => router.push("/history", { scroll: false })} wide drawer><SessionTracePanel key={selected} sessionId={selected} traceId={selectedTrace} live={active} /></Modal>}
   </>;
 }
