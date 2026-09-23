@@ -8,6 +8,8 @@ from collections import defaultdict
 from contextlib import suppress
 from uuid import uuid4
 
+from opentelemetry import trace
+
 from app.config import settings
 from app.kernel.context import package, snapshot
 from app.kernel.provider import ProviderError
@@ -21,6 +23,7 @@ from app.kernel.types import (
     TurnRequest,
 )
 from app.knowledge import open_knowledge
+from app.tracer import current_span_context, span
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +37,19 @@ def replay(state, rid, digest):
     if prior and prior["digest"] != digest:
         raise KernelError("request_conflict", "request_id уже использован с другими параметрами")
     return prior
+
+
+def tool_trace(sid, turn_id, name, args, result):
+    """Атрибуты span'а инструмента (tracer-module.md): без сырого запроса вне `local.*`."""
+    if name != "rag_search":
+        return {"session.id": sid, "turn.id": turn_id, "kb.kind": args["kind"],
+                "kb.key": args["key"], "kb.found": "error" not in result}
+    hits = result.get("hits", [])
+    return {"session.id": sid, "turn.id": turn_id, "rag.kinds": args["kinds"],
+            "rag.limit": args["limit"], "rag.search_mode": result.get("search_mode"),
+            "rag.degraded_reason": result.get("degraded_reason") or result.get("error"),
+            "rag.hits": len(hits), "rag.source_ids": json.dumps([h.get("source_id") for h in hits]),
+            "local.rag.query": args["query"], "local.rag.search_query": args.get("search_query")}
 
 
 def require_open(state):
@@ -58,6 +74,7 @@ class Runtime:
         self.main_tasks = {}
         self.background_tasks = defaultdict(dict)
         self.tool_tasks = {}
+        self.trace_links = {}  # sid → span хода, в памяти: link для фоновых agent.run
         self.semaphores = defaultdict(lambda: asyncio.Semaphore(settings.kernel_background_parallelism))
         self.global_semaphore = asyncio.Semaphore(settings.kernel_global_parallelism)
         # Reserve model capacity for foreground work even when many sessions have queued background work.
@@ -226,6 +243,7 @@ class Runtime:
             result, is_new = await self._change(sid, apply)
             if not is_new:
                 return result
+            self.trace_links[sid] = current_span_context()
             for task in self.background_tasks[sid].values():
                 task.cancel()
             self.background_tasks[sid] = {}
@@ -269,6 +287,14 @@ class Runtime:
                 self.background_tasks[sid][run["run_id"]] = task
 
     async def run_background(self, sid, agent, run):
+        # фон переживает запрос: своя трасса (без родителя) с link на ход
+        with trace.use_span(trace.INVALID_SPAN), span("agent.run", {
+            "agent.name": agent["agent_id"], "session.id": sid, "turn.id": run["turn_id"],
+            "call.generation": run["generation"], "run.id": run["run_id"],
+        }, links=[c for c in [self.trace_links.get(sid)] if c]):
+            await self._run_background(sid, agent, run)
+
+    async def _run_background(self, sid, agent, run):
         run_id = run["run_id"]
         try:
             async with self.semaphores[sid], self.background_capacity, self.global_semaphore:
@@ -327,7 +353,10 @@ class Runtime:
         try:
             async with asyncio.timeout(settings.kernel_response_timeout):
                 for index in range(settings.kernel_max_segments):
-                    result = await self.generate_segment(sid, rid, index)
+                    with span("segment", {"session.id": sid, "response.id": rid,
+                                          "segment.index": index}) as seg:
+                        result = await self.generate_segment(sid, rid, index)
+                        seg.set_attribute("segment.used_source_ids", len(result.used_source_ids))
                     if not result.continue_response:
                         break
                 async with self.locks[sid]:
@@ -363,6 +392,7 @@ class Runtime:
         response = self._active(state, rid)
         ctx = package(state, rid)
         segment_id = str(uuid4())
+        trace.get_current_span().set_attributes({"segment.id": segment_id, "turn.id": response["turn_id"]})
         async with self.locks[sid]:
             def start(state, seq):
                 response = self._active(state, rid)
@@ -435,7 +465,10 @@ class Runtime:
         key = (sid, run["input_revision"], name, json.dumps(args, sort_keys=True))
         if key not in self.tool_tasks:
             self.tool_tasks[key] = asyncio.create_task(self._execute_tool(name, args))
-        result = await asyncio.shield(self.tool_tasks[key])
+        with span("rag.search" if name == "rag_search" else "kb.read") as tool_span:
+            result = await asyncio.shield(self.tool_tasks[key])
+            tool_span.set_attributes({k: v for k, v in tool_trace(
+                sid, run["turn_id"], name, args, result).items() if v is not None})
         async with self.locks[sid]:
             def finish(state, seq):
                 if self._fresh(state, run) and "error" not in result:

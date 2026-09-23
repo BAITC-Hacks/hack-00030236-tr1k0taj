@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import call, context, kernel, knowledge
+from app import call, context, kernel, knowledge, tracer
 from app.config import settings
 from app.db import SessionLocal, engine, get_session
 from app.docs import DESCRIPTION, TAGS
@@ -18,6 +18,9 @@ from app.knowledge import ensure_loaded, schedule_reindex_knowledge, stop_reinde
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
+    tracer.setup_tracing()  # идемпотентно; OTEL_* из env (ADR 0013)
+    tracer.instrument_sqlalchemy(engine)  # SQL → span'ы db.query, до первых запросов
+    await tracer.start_persistence(SessionLocal)  # span'ы звонков пишутся в trace_spans
     async with SessionLocal() as session:
         await ensure_loaded(session, Path(settings.datasets_dir))
     contexts = context.Contexts(context.PgStore())
@@ -34,6 +37,7 @@ async def lifespan(application: FastAPI):
     finally:
         await kernel.shutdown()
         await stop_reindex_knowledge()
+        await tracer.stop_persistence()  # до engine.dispose(): досбросить очередь span'ов
         await engine.dispose()
 
 
@@ -49,6 +53,9 @@ app.include_router(call.api_router)
 app.include_router(context.api_router)
 app.include_router(knowledge.api_router)
 app.include_router(kernel.api_router)
+app.include_router(tracer.api_router)
+# последним add_middleware → самый внешний: SERVER span покрывает весь запрос и SSE-тело
+app.add_middleware(tracer.TraceMiddleware)
 
 
 @app.exception_handler(KernelError)
