@@ -12,6 +12,7 @@ Public API for the agent kernel — import only from here:
 See docs/specs/knowledge-module.md.
 """
 
+from app.knowledge.api import router as api_router
 from app.knowledge.catalog import Catalog
 from app.knowledge.loader import build_records, ensure_loaded, load_kit
 from app.knowledge.rag import (
@@ -52,6 +53,7 @@ __all__ = [
     "Search",
     "Slot",
     "SystemIntent",
+    "api_router",
     "build_records",
     "ensure_loaded",
     "load_kit",

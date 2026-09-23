@@ -8,14 +8,12 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import call, context
+from app import call, context, kernel, knowledge
 from app.config import settings
 from app.db import SessionLocal, engine, get_session
 from app.docs import DESCRIPTION, TAGS
 from app.kernel import KernelError, ModelDriver, Repository, Runtime
-from app.kernel.api import router as kernel_router
 from app.knowledge import ensure_loaded, schedule_reindex_knowledge, stop_reindex_knowledge
-from app.knowledge.api import router as kit_router
 
 
 @asynccontextmanager
@@ -49,8 +47,8 @@ app = FastAPI(
 )
 app.include_router(call.api_router)
 app.include_router(context.api_router)
-app.include_router(kit_router)
-app.include_router(kernel_router)
+app.include_router(knowledge.api_router)
+app.include_router(kernel.api_router)
 
 
 @app.exception_handler(KernelError)
