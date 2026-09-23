@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import context
 from app.config import settings
 from app.db import SessionLocal, engine, get_session
 from app.knowledge import ensure_loaded
@@ -14,15 +15,17 @@ from app.knowledge.api import router as kit_router
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(app: FastAPI):
     async with SessionLocal() as session:
         await ensure_loaded(session, Path(settings.datasets_dir))
+    app.state.contexts = context.Contexts(context.PgStore())
     yield
     await engine.dispose()
 
 
 app = FastAPI(title="Voice Router API", lifespan=lifespan)
 app.include_router(kit_router)
+app.include_router(context.api_router)
 
 Session = Annotated[AsyncSession, Depends(get_session)]
 

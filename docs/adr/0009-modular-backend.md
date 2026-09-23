@@ -16,7 +16,8 @@
   `Scenario`, `Client`, `Claim` — в `app.knowledge`. Общего `schemas/` нет.
 - Модуль скрывает хранилище (таблицы, JSON). FastAPI — только в `api.py` модуля.
 - Направление зависимостей: `router`, `executor`, `background` → `context`, `knowledge`;
-  `knowledge` → `context` только ради `Fact`; `context` ни от кого из kernel не зависит.
+  `context` ни от кого из kernel не зависит. `knowledge.Fact` совместим по полям с `context.Fact`,
+  `context` принимает оба; свести к одному типу — отдельным PR владельцев.
 
 ## Альтернативы
 - Общий `schemas/` — нет явного владельца, конфликты в одном файле.

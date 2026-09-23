@@ -27,7 +27,7 @@ backend/app/context/
 пишется в Postgres одной транзакцией: upsert `sessions` + insert `board_entries`.
 Перезапуск завершает звонок, восстановление не делаем.
 
-Типы `Fact`, `BoardEntry`, `ContextPatch` принадлежат `context`. `knowledge` отдаёт факты как `app.context.Fact`.
+Типы `Fact`, `BoardEntry`, `ContextPatch` принадлежат `context`. `add_facts` и `ContextPatch` принимают и `knowledge.Fact` (те же поля).
 
 ## Публичный API
 
