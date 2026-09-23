@@ -170,6 +170,7 @@ backend). `cancel`, `playback`, `router/last` по незнакомому UUID �
 Модуль `call` оркестрирует ход и зависит от портов, а не от провайдеров:
 `SpeechToText`, `ScenarioRouter`, `Executor`, `Responder`, `TextToSpeech`, `Background`.
 Реализации выбираются через env (`STT_PROVIDER`, `LLM_PROVIDER`, `TTS_PROVIDER`, по умолчанию `mock`).
+`LLM_PROVIDER=openai` — `app.router.OpenAIRouter`: Responses API, strict json_schema (enum всех ID), системная часть = правила + карточки всех 40 сценариев + SYS_* + слоты (кэшируется), usage → `gen_ai.usage.*`; без ключа — `llm_unavailable`.
 Где живут порты: `SpeechToText`/`TextToSpeech` и моки речи — модуль `speech`
 (docs/specs/speech-module.md); `Executor`/`Responder`/`Background` и базовые реализации — модуль `executor`
 (docs/specs/executor-module.md); `ScenarioRouter` и `Providers` — `call.ports`. `app.call` реэкспортирует прежние имена.
